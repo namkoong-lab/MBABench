@@ -566,6 +566,55 @@ class ChatGPTWebAgent(WebAgent):
         except Exception:
             return False
 
+    async def _dump_phase1_timeout_state(self, prompt_number: int) -> None:
+        """Save HTML + screenshot when Phase-1 start-detection times out.
+
+        Lets us reconstruct what the page actually looked like during a
+        'Response generation did not start within 120s' failure.
+        """
+        try:
+            from datetime import datetime
+            from pathlib import Path
+
+            if self.completion_logger is not None:
+                base_dir = Path(self.completion_logger.log_dir).parent
+                task_id = self.completion_logger.task_identifier or "unknown"
+            else:
+                base_dir = Path.cwd()
+                task_id = "unknown"
+            dump_dir = base_dir / "phase1_timeouts"
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            stem = f"{ts}_{task_id}_p{prompt_number}"
+            html_path = dump_dir / f"{stem}.html"
+            png_path = dump_dir / f"{stem}.png"
+            try:
+                html = await self.page.content()
+                html_path.write_text(html, encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"Phase-1 timeout HTML dump failed: {e}")
+            try:
+                await self.page.screenshot(path=str(png_path), full_page=True)
+            except Exception as e:
+                logger.warning(f"Phase-1 timeout screenshot failed: {e}")
+            logger.info(f"Phase-1 timeout state saved to {dump_dir}/{stem}.{{html,png}}")
+        except Exception as e:
+            logger.warning(f"Phase-1 timeout dump failed: {e}")
+
+    async def _count_conversation_turns(self) -> int:
+        """Count [data-testid^="conversation-turn-"] elements.
+
+        Used as an early Phase-1 signal: a new turn DOM is mounted as soon as
+        the user submits, before the lazily-set data-message-author-role
+        attribute appears and before the stop-button mounts in some flows.
+        """
+        try:
+            return await self.page.evaluate(
+                "() => document.querySelectorAll('[data-testid^=\"conversation-turn-\"]').length"
+            )
+        except Exception:
+            return 0
+
     async def _count_response_articles(self) -> int:
         """Count ChatGPT response articles currently on the page.
 
@@ -631,6 +680,11 @@ class ChatGPTWebAgent(WebAgent):
         min_elapsed_sec = 300 if self.agent_mode else 120
         min_elapsed_sec_with_file = 30  # Accept quickly if file card present
 
+        # Snapshot conversation-turn count too — turn DOM mounts immediately
+        # on submit, so an increment is a strong start signal even when the
+        # stop-button or data-message-author-role attribute hasn't appeared yet.
+        baseline_turn_count = await self._count_conversation_turns()
+
         # Give ChatGPT time to start generating
         await self.page.wait_for_timeout(5000)
 
@@ -655,10 +709,19 @@ class ChatGPTWebAgent(WebAgent):
                 )
                 break
 
+            current_turn_count = await self._count_conversation_turns()
+            if current_turn_count > baseline_turn_count:
+                generation_started = True
+                logger.info(
+                    f"New conversation turn appeared ({current_turn_count} > {baseline_turn_count})"
+                )
+                break
+
             await self.page.wait_for_timeout(2000)
 
         if not generation_started:
             logger.error("Response generation did not start within 120s")
+            await self._dump_phase1_timeout_state(prompt_number)
             return None
 
         # Phase 2: Wait for completion using content stabilization
