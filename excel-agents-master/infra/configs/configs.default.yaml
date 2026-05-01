@@ -1,0 +1,396 @@
+# ============================================================================
+# excel-agents infra — default config schema.
+#
+# This file defines EVERY configurable knob and its default for the DB-driven
+# infra/run.py path (NOT used by batch_automation_runner.py, which keeps its
+# own per-task YAML / template format).
+#
+# To override anything, create a sibling `configs.yaml` (gitignored) and set
+# only the keys you want to change. A `--run-config` YAML can also deep-merge
+# overrides for a single run (or, if it has top-level `task_name`/`tasks`/
+# `upload_files`, be loaded as a YamlTaskSource directly).
+#
+# Merge order (later wins):
+#   1. configs.default.yaml       (this file)
+#   2. configs.yaml               (user global overrides; gitignored)
+#   3. --run-config <path>        (run-scoped overrides; optional)
+#
+# Leaf form: each concrete setting is a dict with two keys:
+#     value:    the default (or "" / [] / null if none)
+#     required: true  -> must be truthy after merge, else ConfigError
+#               false -> may be empty; callers decide when it's needed
+#
+# Override form: in configs.yaml and --run-config you may use EITHER the full
+# `{value: ...}` form or a raw scalar/list:
+#     source:
+#       kind: "postgres_s3"           # raw — shorthand
+#       kind: {value: "postgres_s3"}  # full form — same effect
+# ============================================================================
+
+
+# ---- Which provider / agent is running -------------------------------------
+# Value MUST be one of the agent_type strings the engine recognizes — the
+# engine reads `config[agent_type]` to find the provider block, so the same
+# string is also the key of the matching block below.
+provider:
+  kind:
+    value: "claude_excel_agent"   # claude_excel_agent | chatgpt_excel_agent | tabai
+    required: true
+
+
+# ---- Agent identity --------------------------------------------------------
+# `model_name`, `agent_folder`, and `agent_model_type` are derived in
+# infra/configs/agent_identity.py from the active provider block, so they
+# never drift from the actual run behavior. `prompt_version` stays
+# operator-controlled because it's independent of any behavior field.
+agent:
+  prompt_version:
+    value: 8
+    required: false
+
+
+# ---- Where task files land on disk -----------------------------------------
+paths:
+  scratch_dir:
+    value: "scratch/excel-agents"   # downloaded starting_files land here
+    required: true
+  output_dir:
+    value: "outputs"                # local sink writes attempts ndjson here
+    required: false
+  venv_path:
+    value: ""                       # override if the runner shells out
+    required: false
+
+
+# ---- Task source (where tasks come from) -----------------------------------
+source:
+  kind:
+    value: "yaml"            # "yaml" | "postgres_s3"
+    required: true
+
+  # REQUIRED when kind == "postgres_s3": picks the concrete schema wiring.
+  # Currently the only value is "bizbench" (BizbenchPostgresS3TaskSource).
+  # Must be null/omitted for kinds that don't use it (e.g. "yaml").
+  schema:
+    value: null              # null | "bizbench"
+    required: false
+
+  # Used when kind == "yaml". Either a single file with a `tasks:` list, or a
+  # folder whose *.yaml files are each loaded (one task per file is typical).
+  yaml_path:
+    value: "infra/configs/task_configs"
+    required: false
+
+  # Used when kind == "postgres_s3"
+  filters:
+    task_ids:
+      value: []              # [] = no filter
+      required: false
+    task_sources:
+      value: []              # e.g. ["fmwc", "modeloff", "wsp"]
+      required: false
+    skip_deprecated:
+      value: true
+      required: false
+    skip_already_attempted:
+      value: true             # skip tasks that already have a non-failed
+                              # attempt from this agent at this prompt_version
+      required: false
+
+
+# ---- Attempt sink (where results go) ---------------------------------------
+sink:
+  kind:
+    value: "local"           # "local" | "postgres_s3"
+    required: true
+
+  # REQUIRED when kind == "postgres_s3": picks the concrete schema wiring.
+  # Currently the only value is "bizbench" (BizbenchPostgresS3AttemptSink).
+  # Must be null/omitted for kinds that don't use it (e.g. "local").
+  schema:
+    value: null              # null | "bizbench"
+    required: false
+
+  # Used when kind == "local"
+  output_dir:
+    value: "outputs"
+    required: false
+
+
+# ---- Database --------------------------------------------------------------
+# Either set `url.value` directly in configs.yaml, or leave it empty and set
+# `url_env` to the name of an env var that holds the connection string
+# (existing convention: BIZBENCHJUDGE_KEYS_DATABASE_URL).
+database:
+  url:
+    value: ""
+    required: false
+  url_env:
+    value: "BIZBENCHJUDGE_KEYS_DATABASE_URL"
+    required: false
+
+
+# ---- AWS / S3 --------------------------------------------------------------
+# Credentials follow the same direct-or-env pattern as `database.url`:
+#   * set `access_key_id.value` + `secret_access_key.value` in configs.yaml, OR
+#   * leave them empty and set the `_env` keys to env vars that hold them.
+# If both are empty, boto3's default credential chain is used (~/.aws/
+# credentials, IAM role, etc.).
+aws:
+  region:
+    value: "us-east-1"
+    required: false
+  access_key_id:
+    value: ""
+    required: false
+  access_key_id_env:
+    value: "AWS_ACCESS_KEY_ID"
+    required: false
+  secret_access_key:
+    value: ""
+    required: false
+  secret_access_key_env:
+    value: "AWS_SECRET_ACCESS_KEY"
+    required: false
+  session_token:
+    value: ""
+    required: false
+  session_token_env:
+    value: "AWS_SESSION_TOKEN"
+    required: false
+  s3_bucket:
+    value: "biz-bench"
+    required: false
+  s3_prefix:
+    value: "BizbenchV1/attempts"   # final key = {prefix}/{agent_folder}/task_source={src}/task_id={id}/...
+    required: false
+
+
+# ---- Poll loop -------------------------------------------------------------
+poll:
+  interval_seconds:
+    value: 60
+    required: false
+  max_idle_seconds:
+    value: 3600              # runner exits after this long with no work
+    required: false
+
+
+# ============================================================================
+# Engine inputs (everything from here down is assembled into the dict passed
+# to the engine subprocess, once per task, by infra/run.py).
+#
+# The Excel engine (excel_agent/engine.py) reads `config["agent_type"]`
+# (set from `provider.kind` by infra/run.py) and uses that string as the key
+# into the matching provider block (e.g. config["claude_excel_agent"]).
+# ============================================================================
+
+
+# ---- Shared (all providers) ------------------------------------------------
+# Default empty: each run-config or task YAML must provide prompts. The
+# preflight in infra/run.py rejects an empty list before launching the
+# engine (the engine itself also rejects it at engine.py:1110).
+prompts:
+  value: []
+  required: false
+
+prompt_version:
+  value: 8                     # engine config's prompt_version (top-level)
+  required: false
+
+# Empty = let the engine resolve paths from CWD. Set to the directory
+# your per-task upload_files are relative to. The DB/S3 source writes
+# downloaded starting_files under paths.scratch_dir, and infra/run.py
+# automatically sets local_files_base to that directory.
+local_files_base:
+  value: ""
+  required: false
+
+# Override the OneDrive base path used by the task-source shorthand
+# (path becomes file_path + task_source + task_name + "Task"). Tasks that
+# explicitly pass `onedrive_path` or `direct_url` ignore this entirely.
+file_path:
+  value: []
+  required: false
+
+
+# ---- Claude Excel provider block (passed as engine_config["claude_excel_agent"]) ----
+claude_excel_agent:
+  # Pin the add-in model dropdown. Matched case-insensitively against the
+  # button title/text and the dropdown menu items. Values: "Opus 4.6",
+  # "Sonnet 4.6", or any other label the add-in currently shows.
+  # null = let the add-in's current default win.
+  model:
+    value: "Opus 4.6"
+    required: false
+
+  max_sec_per_task:
+    value: 7200                # 2h
+    required: false
+
+  check_interval_seconds:
+    value: 60
+    required: false
+
+  max_wait_per_prompt_seconds:
+    value: 7200
+    required: false
+
+  panel_boot_timeout_seconds:
+    value: 20
+    required: false
+
+  skip_file_upload:
+    value: false
+    required: false
+
+  browser:
+    type:
+      value: "chrome"          # chrome (CDP) — recommended
+      required: false
+    headless:
+      value: false
+      required: false
+    timeout:
+      value: 10000
+      required: false
+
+  logging:
+    level:
+      value: "INFO"
+      required: false
+    save_to_file:
+      value: true
+      required: false
+    log_directory:
+      value: "claude_excel_logs"
+      required: false
+
+  runtime:
+    no_hold:
+      value: true
+      required: false
+    kill_all_browsers:
+      value: false
+      required: false
+
+
+# ---- ChatGPT Excel provider block (passed as engine_config["chatgpt_excel_agent"]) ----
+chatgpt_excel_agent:
+  # Pin the add-in "Thinking effort" pill. Matched case-insensitively against
+  # the button's aria-label and the dropdown menu items: "Fast" | "Standard" |
+  # "Heavy" | any future label. null = leave whatever the add-in currently shows.
+  thinking_effort:
+    value: "Heavy"
+    required: false
+
+  # "Apply edits automatically" switch behind the "..." settings menu.
+  # true  -> ensure on
+  # false -> ensure off
+  # null  -> don't touch
+  apply_edits_automatically:
+    value: true
+    required: false
+
+  max_sec_per_task:
+    value: 7200                # 2h
+    required: false
+
+  check_interval_seconds:
+    value: 60
+    required: false
+
+  max_wait_per_prompt_seconds:
+    value: 7200
+    required: false
+
+  panel_boot_timeout_seconds:
+    value: 20
+    required: false
+
+  skip_file_upload:
+    value: false
+    required: false
+
+  browser:
+    type:
+      value: "chrome"
+      required: false
+    headless:
+      value: false
+      required: false
+    timeout:
+      value: 10000
+      required: false
+
+  logging:
+    level:
+      value: "INFO"
+      required: false
+    save_to_file:
+      value: true
+      required: false
+    log_directory:
+      value: "chatgpt_excel_logs"
+      required: false
+
+  runtime:
+    no_hold:
+      value: true
+      required: false
+    kill_all_browsers:
+      value: false
+      required: false
+
+
+# ---- TabAI provider block (passed as engine_config["tabai"]) ---------------
+tabai:
+  max_sec_per_task:
+    value: 5400                # 90 min
+    required: false
+
+  check_interval_seconds:
+    value: 60
+    required: false
+
+  max_wait_per_prompt_seconds:
+    value: 1800
+    required: false
+
+  panel_boot_timeout_seconds:
+    value: 20
+    required: false
+
+  skip_file_upload:
+    value: false
+    required: false
+
+  browser:
+    type:
+      value: "firefox"         # TabAI agent uses Playwright Firefox
+      required: false
+    headless:
+      value: false
+      required: false
+    timeout:
+      value: 10000
+      required: false
+
+  logging:
+    level:
+      value: "INFO"
+      required: false
+    save_to_file:
+      value: true
+      required: false
+    log_directory:
+      value: "tabai_logs"
+      required: false
+
+  runtime:
+    no_hold:
+      value: true
+      required: false
+    kill_all_browsers:
+      value: false
+      required: false

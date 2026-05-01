@@ -1,0 +1,53 @@
+# Sample run-config (overlay-shaped) — pulls tasks from the BizbenchV1
+# Postgres DB AND writes attempts back to S3 + task_attempts.
+#
+# Run it with:
+#   python -m infra.run --run-config infra/configs/run_configs/bizbench_run_examples/sample_bizbench_write.yaml
+#
+# Same shape as sample_bizbench_claude_excel.yaml — the only difference is
+# `sink.kind: postgres_s3`, which uploads the solution + completion log to
+# S3 and inserts one row into task_attempts per run.
+#
+# Prereqs in infra/configs/configs.yaml (gitignored):
+#   database:
+#     url: "postgresql://.../BizbenchV1?sslmode=require&channel_binding=require"
+#
+# AWS credentials: set aws.access_key_id(_env) / secret_access_key(_env)
+# in configs.yaml. Boto3's default credential chain is consulted only as
+# a fallback when both direct values and *_env are empty.
+#
+# Idempotency: source.filters.skip_already_attempted skips tasks that
+# already have a non-failed attempt at this (agent_model_name,
+# prompt_version), where agent_model_name is derived from
+# infra/configs/agent_identity.py. Failed/timeout runs still get a row
+# with agent_failed=true so the next pass can retry them deliberately.
+
+provider:
+  kind: "claude_excel_agent"
+
+source:
+  kind: postgres_s3
+  schema: bizbench
+  filters:
+    task_ids: [1]
+    skip_deprecated: false
+    skip_already_attempted: false
+
+sink:
+  kind: postgres_s3
+  schema: bizbench       # picks BizbenchPostgresS3AttemptSink
+  # S3 bucket + prefix come from aws.* in configs.default.yaml.
+  # agent_folder / agent_model_name / agent_model_type are derived from
+  # the provider block (see infra/configs/agent_identity.py).
+  # prompt_version comes from agent.prompt_version.
+
+claude_excel_agent:
+  model: "Opus 4.6"
+
+file_path:
+  - "My files"
+  - "AI_mba_test_files"
+  - "main_tasks"
+
+prompts:
+  - "Analyze the attached files. Build an Excel solution using formulas (no hardcoded values), create a Summary sheet and an Answers sheet. Do not stop until the workbook is complete."

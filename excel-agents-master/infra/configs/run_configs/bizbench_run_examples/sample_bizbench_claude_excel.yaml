@@ -1,0 +1,60 @@
+# Sample run-config (overlay-shaped) — pulls tasks from the BizbenchV1
+# Postgres DB and runs them through the Claude Excel add-in agent.
+#
+# Run it with:
+#   python -m infra.run --run-config infra/configs/run_configs/bizbench_run_examples/sample_bizbench_claude_excel.yaml
+#
+# This file is overlay-shaped (no top-level task fields like task_name or
+# upload_files) — it is deep-merged onto configs.yaml as a 3rd config layer.
+# Put long-lived machine/project settings (database.url, AWS credentials)
+# in configs.yaml; put "what to run this time" here.
+#
+# Prereqs in infra/configs/configs.yaml (gitignored):
+#   database:
+#     url: "postgresql://.../BizbenchV1?sslmode=require&channel_binding=require"
+#   aws:
+#     access_key_id_env: "AWS_ACCESS_KEY_ID"      # or set values directly
+#     secret_access_key_env: "AWS_SECRET_ACCESS_KEY"
+#
+# Browser prereqs (laptop):
+#   1. Chrome Canary running with CDP (see scripts/setup_chrome.sh).
+#   2. Logged into OneDrive / Excel Online in that Chrome profile.
+#   3. The Claude Excel add-in installed in Excel Online.
+
+provider:
+  kind: "claude_excel_agent"
+
+source:
+  kind: postgres_s3
+  schema: bizbench       # picks BizbenchPostgresS3TaskSource
+  filters:
+    # Pick one (or both): filter by explicit task_ids, or by task_source.
+    task_ids: [1]
+    # task_sources: ["fmwc"]
+    skip_deprecated: true
+    # Skip tasks that already have a non-failed attempt at this
+    # prompt_version from the agent identity resolved from the provider
+    # block above (see infra/configs/agent_identity.py).
+    skip_already_attempted: true
+
+# sink defaults to local (writes attempts.ndjson to outputs/). Switch to
+# postgres_s3 / bizbench to upload solutions + insert task_attempts rows.
+
+claude_excel_agent:
+  model: "Opus 4.6"
+  # Override per-run; defaults come from configs.default.yaml.
+  # max_sec_per_task: 7200
+
+# OneDrive base path used by the engine to navigate into a task folder.
+# The DB-driven path still needs SOMEWHERE on OneDrive to create the
+# blank workbook. Adapt to your OneDrive layout.
+file_path:
+  - "My files"
+  - "AI_mba_test_files"
+  - "main_tasks"
+
+# Single combined Claude prompt (matches tasks_configs/templates/claude.yaml)
+# kept short here for the example. Replace with the full rubric+task prompt
+# from your template if you want parity with the local-YAML path.
+prompts:
+  - "Analyze the attached files. Build an Excel solution using formulas (no hardcoded values), and create a Summary sheet and an Answers sheet. Do not stop until the workbook is complete."

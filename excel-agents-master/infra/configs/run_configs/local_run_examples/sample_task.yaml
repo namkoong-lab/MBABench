@@ -1,0 +1,52 @@
+# Sample run-config (task-shaped).
+# ---------------------------------
+# Run it with:
+#   python -m infra.run --run-config infra/configs/run_configs/local_run_examples/sample_task.yaml
+#
+# Because the top level contains task fields (task_name, upload_files, ...),
+# --run-config treats this as a YAML task file and hands it to YamlTaskSource.
+# One task per file is the recommended layout (you can also put a `tasks:`
+# list at the top level to bundle multiple tasks in one file).
+#
+# Reserved task fields (consumed by the runner, not forwarded to the engine
+# as overrides):
+#   task_name           — required
+#   upload_files        — list of local paths
+#   files_to_upload     — alias for upload_files
+#   solution_name       — base name for the output file
+#   skip                — true to skip this task
+#   task_source         — provenance string (used by sinks / DB)
+#
+# Anything else at the top level is treated as a project-wide override and
+# deep-merged onto the global cfg *for this task only*. For example, a task
+# can switch to Sonnet with a longer timeout without touching configs.yaml:
+#
+#     claude_excel_agent:
+#       model: "Sonnet 4.6"
+#       max_sec_per_task: 10800
+
+task_name: "Sample_Task"
+task_source: "my_tasks"
+
+upload_files:
+  - "data/sample/MO15 Round 1 - Sec 2 - Bread and Butter - Workbook.xlsx"
+  - "data/sample/MO15 Round 1 - Sec 2 - Bread and Butter.pdf"
+
+solution_name: "Sample_Task_Bread_and_Butter"
+
+# Uncomment to skip:
+# skip: true
+
+provider:
+  kind: "claude_excel_agent"
+
+claude_excel_agent:
+  model: "Opus 4.6"
+
+file_path:
+  - "My files"
+  - "AI_mba_test_files"
+  - "main_tasks"
+
+prompts:
+  - "Analyze the attached files. Build an Excel solution using formulas (no hardcoded values), create a Summary sheet and an Answers sheet."

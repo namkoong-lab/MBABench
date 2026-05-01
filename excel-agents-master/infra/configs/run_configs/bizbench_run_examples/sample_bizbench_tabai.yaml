@@ -1,0 +1,35 @@
+# Sample run-config (overlay-shaped) — pulls tasks from the BizbenchV1
+# Postgres DB and runs them through the TabAI Excel agent.
+#
+# Run it with:
+#   python -m infra.run --run-config infra/configs/run_configs/bizbench_run_examples/sample_bizbench_tabai.yaml
+#
+# TabAI uses Playwright Firefox (not Chrome CDP). Run scripts/setup_firefox.sh
+# once to seed the persistent Firefox profile with a Microsoft 365 login.
+
+provider:
+  kind: "tabai"
+
+source:
+  kind: postgres_s3
+  schema: bizbench
+  filters:
+    task_ids: [1]
+    skip_deprecated: true
+    skip_already_attempted: true
+
+agent:
+  prompt_version: 1
+
+prompt_version: 1
+
+file_path:
+  - "My files"
+  - "AI_mba_test_files"
+  - "main_tasks"
+
+# Sequential prompts — TabAI handles multi-turn well.
+prompts:
+  - "Analyze the attached files. Summarize the key data and questions to answer."
+  - "Build an Excel solution on a new sheet. Use formulas (no hardcoded values) and organize the workbook clearly."
+  - "Create a summary sheet with your final answers and conclusions."

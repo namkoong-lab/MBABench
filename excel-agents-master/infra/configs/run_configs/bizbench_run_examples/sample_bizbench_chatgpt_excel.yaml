@@ -1,0 +1,40 @@
+# Sample run-config (overlay-shaped) — pulls tasks from the BizbenchV1
+# Postgres DB and runs them through the ChatGPT Excel add-in agent.
+#
+# Run it with:
+#   python -m infra.run --run-config infra/configs/run_configs/bizbench_run_examples/sample_bizbench_chatgpt_excel.yaml
+#
+# Same shape and prereqs as sample_bizbench_claude_excel.yaml; only the
+# provider + provider block differs.
+
+provider:
+  kind: "chatgpt_excel_agent"
+
+source:
+  kind: postgres_s3
+  schema: bizbench
+  filters:
+    task_ids: [1]
+    skip_deprecated: true
+    skip_already_attempted: true
+
+# Default sink is local. See sample_bizbench_write.yaml for DB+S3 sink.
+
+chatgpt_excel_agent:
+  thinking_effort: "Heavy"
+  apply_edits_automatically: true
+
+# Per memory: ChatGPT Excel runs with prompt_version 2.
+agent:
+  prompt_version: 2
+
+prompt_version: 2
+
+file_path:
+  - "My files"
+  - "AI_mba_test_files"
+  - "main_tasks"
+
+# ChatGPT works best with one combined prompt rather than a sequence.
+prompts:
+  - "Analyze the attached files. Build an Excel solution using formulas (no hardcoded values), create a Summary sheet and an Answers sheet, and download the workbook when done."

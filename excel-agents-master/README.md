@@ -243,6 +243,108 @@ uv run python batch_automation_runner.py \
 
 ---
 
+## Run from BizbenchV1 DB (`infra/run.py`)
+
+There are two ways to run tasks. Pick one based on where the tasks live:
+
+| Path | Use when | Source of tasks | Where attempts go |
+|---|---|---|---|
+| `batch_automation_runner.py` | Tasks live in local YAML; you want the dual-counter retry loop and `_mark_deprecated_jsons` behavior | `tasks_configs/*.yaml` | Local files only |
+| `infra/run.py` | Tasks live in the BizbenchV1 Postgres `tasks` table; you want attempts auto-uploaded to S3 + recorded in `task_attempts` | Postgres + S3 (or YAML, your choice) | Local NDJSON OR S3 + Postgres |
+
+The two coexist — `infra/run.py` does **not** replace `batch_automation_runner.py`. Pick whichever fits the task you're running. `infra/run.py` is single-attempt-per-task (no retry loop); rerun the runner if you want another attempt.
+
+### Layout
+
+```
+infra/
+├── __init__.py
+├── run.py                          # CLI entry point: python -m infra.run
+└── configs/
+    ├── __init__.py
+    ├── loader.py                   # Hierarchical YAML merge (defaults + overrides + run-config)
+    ├── agent_identity.py           # provider.kind → AgentIdentity (model_name / agent_folder / type)
+    ├── configs.default.yaml        # FULL schema. Don't edit; override in configs.yaml.
+    ├── configs.yaml                # Gitignored — your machine-specific overrides go here.
+    └── run_configs/
+        ├── bizbench_run_examples/  # DB-driven samples (one per agent)
+        └── local_run_examples/     # Task-shaped YAML samples
+task_io/
+├── base.py                         # TaskSpec / AttemptResult / TaskSource / AttemptSink protocols
+├── registry.py                     # build_source(cfg) / build_sink(cfg)
+├── sources/
+│   ├── yaml_source.py              # YamlTaskSource
+│   └── postgres_s3.py              # BizbenchPostgresS3TaskSource (DB read + S3 download)
+└── sinks/
+    ├── local_sink.py               # LocalAttemptSink (NDJSON to outputs/)
+    └── postgres_s3.py              # BizbenchPostgresS3AttemptSink (S3 upload + DB insert)
+```
+
+### Config hierarchy (later wins)
+
+1. `infra/configs/configs.default.yaml` — checked-in defaults, full schema
+2. `infra/configs/configs.yaml` — **gitignored**, machine-specific (DB url, AWS creds, project_ids)
+3. `--run-config <path>` — run-scoped overlay (which tasks, which provider, run-specific prompts)
+
+A `--run-config` file can be either *overlay-shaped* (no top-level `task_name`) or *task-shaped* (top-level `task_name` / `tasks`). Task-shaped files force `source.kind: yaml` and are loaded via `YamlTaskSource`.
+
+### One-time setup
+
+1. Install the new deps (`boto3`, `psycopg2-binary` are now in `pyproject.toml`):
+   ```bash
+   uv sync
+   ```
+2. Create `infra/configs/configs.yaml` (gitignored) with your DB url + AWS creds:
+   ```yaml
+   database:
+     url: "postgresql://.../BizbenchV1?sslmode=require&channel_binding=require"
+   aws:
+     access_key_id: "AKIA..."
+     secret_access_key: "..."
+   ```
+   Or leave the values empty and rely on the corresponding `*_env` keys (`BIZBENCHJUDGE_KEYS_DATABASE_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) in your environment.
+3. Same Chrome-CDP / Microsoft-365 prereqs as the legacy runner (`scripts/setup_chrome.sh` once; OneDrive session persists in the Chrome profile).
+
+### Run
+
+```bash
+# Pull task 1 from the DB, run it via Claude Excel, write attempt to local NDJSON
+uv run python -m infra.run \
+  --run-config infra/configs/run_configs/bizbench_run_examples/sample_bizbench_claude_excel.yaml
+
+# Same task, but upload solution + insert task_attempts row
+uv run python -m infra.run \
+  --run-config infra/configs/run_configs/bizbench_run_examples/sample_bizbench_write.yaml
+
+# Run a one-off local task (task-shaped run-config)
+uv run python -m infra.run \
+  --run-config infra/configs/run_configs/local_run_examples/sample_task.yaml
+
+# Dry-run (print the merged engine_config per task; no browser, no DB write)
+uv run python -m infra.run --dry-run \
+  --run-config infra/configs/run_configs/bizbench_run_examples/sample_bizbench_claude_excel.yaml
+
+# Run exactly one DB task by id (overrides filters, ignores skip_already_attempted)
+uv run python -m infra.run --task-id 42 \
+  --run-config infra/configs/run_configs/bizbench_run_examples/sample_bizbench_write.yaml
+```
+
+### How attempts are labeled in the DB
+
+`task_attempts.agent_model_name`, `agent_folder`, and `agent_model_type` are **derived** from `provider.kind` via `infra/configs/agent_identity.py` — not yaml fields. Current mapping:
+
+| `provider.kind` | `agent_model_name` | `agent_folder` (S3) | `agent_model_type` |
+|---|---|---|---|
+| `claude_excel_agent` | `claude_excel_agent` | `claude_excel_agent` | `gui` |
+| `chatgpt_excel_agent` | `chatgpt_excel_agent` | `chatgpt_excel_agent` | `gui` |
+| `tabai` | `tabai` | `tabai` | `gui` |
+
+`gui` matches the convention used by all existing browser-based attempts in `task_attempts` (web agents and Excel agents both). `agent_model_name` matches what the legacy upload scripts in `agentic_workflow/bizbench-task-database/` write today, so new rows from `infra/run.py` slot into the existing label namespace without bifurcation.
+
+To bifurcate by model (Opus 4.6 vs Sonnet 4.6, etc.) later, extend the identity tables in `agent_identity.py` to key on `(model,)` and backfill historical rows in a separate migration.
+
+---
+
 ## Direct URL Navigation
 
 If you have a direct link to a task folder, skip folder navigation entirely:

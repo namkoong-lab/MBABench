@@ -5,6 +5,8 @@
 *_auth_state.json
 **/credentials*
 **/secrets*
+# infra/run.py machine-specific overrides (DB url, AWS keys)
+infra/configs/configs.yaml
 
 # Browser session data
 browser_session_*/
