@@ -336,11 +336,11 @@ class ChatGPTWebAgent(WebAgent):
             return True
 
     async def upload_files(self, file_paths: list[str]) -> bool:
-        """Upload files via the + menu > Add photos & files flow.
+        """Upload files by writing directly to the hidden input[type=file].
 
-        Falls back to the "Add files and more" button (bottom-left of composer)
-        if the + menu approach fails — the button text changes depending on
-        whether agent mode is active.
+        UI-version-independent — does not depend on menu text. Falls back to
+        the + menu > "Add photos & files" flow, then to the composer-level
+        "Add files" button.
         """
         try:
             for file_path in file_paths:
@@ -348,63 +348,96 @@ class ChatGPTWebAgent(WebAgent):
 
                 uploaded = False
 
-                # Approach 1: + menu > "Add photos & files"
+                # Approach 1: write directly to a hidden input[type="file"].
+                # ChatGPT mounts these in the DOM regardless of UI version, so
+                # this bypasses the menu lookup entirely. Prefer an input
+                # without an image-only accept filter (the general uploader).
                 try:
-                    # Dismiss any stale popup first
                     await self.page.keyboard.press("Escape")
-                    await self.page.wait_for_timeout(300)
+                    file_inputs = self.page.locator('input[type="file"]')
+                    n = await file_inputs.count()
+                    chosen = None
+                    for i in range(n):
+                        inp = file_inputs.nth(i)
+                        accept = (await inp.get_attribute("accept")) or ""
+                        if "image" not in accept.lower():
+                            chosen = inp
+                            break
+                    if chosen is None and n > 0:
+                        chosen = file_inputs.first
+                    if chosen is not None:
+                        await chosen.set_input_files(file_path)
+                        uploaded = True
+                        logger.info(
+                            f"Used direct input[type=file] upload ({n} input(s) on page)"
+                        )
+                    else:
+                        logger.info(
+                            "No input[type=file] found on page, falling back to + menu"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"Direct input[type=file] upload failed, falling back: {e}"
+                    )
 
-                    plus_btn = self.page.locator(self.SELECTORS["plus_menu_button"])
-                    if await plus_btn.count() > 0:
-                        await plus_btn.click(timeout=5000)
+                # Approach 2: + menu > "Add photos & files"
+                if not uploaded:
+                    try:
+                        # Dismiss any stale popup first
+                        await self.page.keyboard.press("Escape")
+                        await self.page.wait_for_timeout(300)
 
-                        # Wait for the Radix menu to actually open instead of
-                        # a blind 1s timeout. data-state="open" on the role=menu
-                        # root is ChatGPT's open signal; catches silent click
-                        # failures.
-                        try:
-                            await self.page.wait_for_selector(
-                                '[role="menu"][data-state="open"]', timeout=3000
-                            )
-                        except Exception:
-                            logger.debug("+ menu did not show [data-state=open]")
+                        plus_btn = self.page.locator(self.SELECTORS["plus_menu_button"])
+                        if await plus_btn.count() > 0:
+                            await plus_btn.click(timeout=5000)
 
-                        # Anchor on role+name (ARIA accessible name), with
-                        # historical labels as fallbacks. Current ChatGPT UI
-                        # ships "Add photos & files"; older builds shipped
-                        # "Add files and more" / "Add files".
-                        add_files = None
-                        for name in (
-                            "Add photos & files",
-                            "Add files and more",
-                            "Add files",
-                        ):
-                            cand = self.page.get_by_role("menuitem", name=name)
-                            if await cand.count() > 0:
-                                add_files = cand.first
-                                break
+                            # Wait for the Radix menu to actually open instead of
+                            # a blind 1s timeout. data-state="open" on the role=menu
+                            # root is ChatGPT's open signal; catches silent click
+                            # failures.
+                            try:
+                                await self.page.wait_for_selector(
+                                    '[role="menu"][data-state="open"]', timeout=3000
+                                )
+                            except Exception:
+                                logger.debug("+ menu did not show [data-state=open]")
 
-                        try:
-                            if add_files is None:
-                                raise RuntimeError("add_files menuitem not found")
-                            async with self.page.expect_file_chooser(
-                                timeout=10000
-                            ) as fc_info:
-                                await add_files.click(timeout=5000)
+                            # Anchor on role+name (ARIA accessible name), with
+                            # historical labels as fallbacks. Current ChatGPT UI
+                            # ships "Add photos & files"; older builds shipped
+                            # "Add files and more" / "Add files".
+                            add_files = None
+                            for name in (
+                                "Add photos & files",
+                                "Add files and more",
+                                "Add files",
+                            ):
+                                cand = self.page.get_by_role("menuitem", name=name)
+                                if await cand.count() > 0:
+                                    add_files = cand.first
+                                    break
 
-                            file_chooser = await fc_info.value
-                            await file_chooser.set_files(file_path)
-                            uploaded = True
-                        except Exception:
-                            logger.info(
-                                "+ menu 'Add photos & files' not found, trying fallback"
-                            )
-                            await self.page.keyboard.press("Escape")
-                            await self.page.wait_for_timeout(500)
-                except Exception:
-                    logger.info("+ menu approach failed, trying fallback")
+                            try:
+                                if add_files is None:
+                                    raise RuntimeError("add_files menuitem not found")
+                                async with self.page.expect_file_chooser(
+                                    timeout=10000
+                                ) as fc_info:
+                                    await add_files.click(timeout=5000)
 
-                # Approach 2: composer-level "Add files" button (legacy path
+                                file_chooser = await fc_info.value
+                                await file_chooser.set_files(file_path)
+                                uploaded = True
+                            except Exception:
+                                logger.info(
+                                    "+ menu 'Add photos & files' not found, trying fallback"
+                                )
+                                await self.page.keyboard.press("Escape")
+                                await self.page.wait_for_timeout(500)
+                    except Exception:
+                        logger.info("+ menu approach failed, trying fallback")
+
+                # Approach 3: composer-level "Add files" button (legacy path
                 # visible in some agent-mode states). Anchor via aria-label
                 # where possible; text fallbacks are last-resort.
                 if not uploaded:
