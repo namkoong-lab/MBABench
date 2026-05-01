@@ -906,6 +906,14 @@ class ChatGPTWebAgent(WebAgent):
 
             scan_result = await self.page.evaluate(
                 """(baseline) => {
+                // Strip stale tags from prior scans. cardIdx restarts at 0 on
+                // every call, so leftover `art-0-btn-*` tags on previous-turn
+                // buttons would collide with this turn's tags and cause
+                // Playwright strict-mode violations on click.
+                document.querySelectorAll('[data-artifact-btn]').forEach(
+                    b => b.removeAttribute('data-artifact-btn')
+                );
+
                 // File card keywords: ChatGPT may show "Spreadsheet", the actual
                 // filename with .xlsx extension, or other file type labels.
                 const FILE_KEYWORDS = ['.xlsx', '.xls', 'Spreadsheet', 'Excel'];
@@ -975,7 +983,8 @@ class ChatGPTWebAgent(WebAgent):
                         const MSG_ACTION_ARIAS = new Set([
                             'Copy response', 'Copy', 'Good response', 'Bad response',
                             'Share', 'Switch model', 'More actions', 'Edit',
-                            'Read aloud', 'Try again', 'Regenerate'
+                            'Read aloud', 'Try again', 'Regenerate',
+                            'Coding Citation'
                         ]);
                         for (let depth = 0; depth < 8 && container; depth++) {
                             const buttons = container.querySelectorAll('button');
