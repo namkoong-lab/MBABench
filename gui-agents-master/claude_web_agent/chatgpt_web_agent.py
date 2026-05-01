@@ -657,16 +657,18 @@ class ChatGPTWebAgent(WebAgent):
         logger.info(f"Waiting for response to prompt {prompt_number}...")
         start_time = asyncio.get_event_loop().time()
 
-        # Phase 0: Snapshot how many response articles exist BEFORE this response
+        # Phase 0: Snapshot how many response articles exist right now.
+        # The persistent baseline (used by download_all_artifacts) is captured
+        # in process_all_prompts BEFORE the first submit, to avoid a race with
+        # the assistant-turn shell mounting on send. Here we just record the
+        # current count for start-detection in Phase 1.
         baseline_article_count = await self._count_response_articles()
         if not self._baseline_set:
-            # Only store baseline before the FIRST prompt so that
-            # download_all_artifacts searches ALL conversation articles,
-            # not just those from the last prompt.
+            # Defensive fallback: should have been set in process_all_prompts.
             self._baseline_article_count = baseline_article_count
             self._baseline_set = True
-            logger.info(
-                f"Baseline response articles on page (first prompt): {baseline_article_count}"
+            logger.warning(
+                f"Baseline not pre-set; capturing now (post-submit) = {baseline_article_count}"
             )
         else:
             logger.info(
@@ -1049,16 +1051,38 @@ class ChatGPTWebAgent(WebAgent):
                         });
                 }
                 const totalAssistant = responseElements.length;
-                const newArticles = responseElements.slice(baseline);
+                const effectiveBaseline = Math.min(baseline, totalAssistant);
+                const newArticles = responseElements.slice(effectiveBaseline);
                 const artifacts = [];
                 const seenCards = new Set();
 
                 // Pass 1: scan assistant articles after the baseline.
-                for (const article of newArticles) {
-                    scanRoot(article, artifacts, seenCards);
+                for (let idx = 0; idx < newArticles.length; idx++) {
+                    const before = artifacts.length;
+                    scanRoot(newArticles[idx], artifacts, seenCards);
+                    for (let k = before; k < artifacts.length; k++) {
+                        artifacts[k].assistantIndex = effectiveBaseline + idx;
+                    }
                 }
 
-                // Pass 2 (fallback): if nothing found, scan entire document body.
+                // Pass 1b: if the slice was empty but assistants do exist
+                // (off-by-one race between submit and baseline snapshot, or
+                // baseline carried from a prior conversation), rescan the
+                // full assistant set so we don't silently drop the only
+                // article that holds the file card.
+                let fullAssistantRescanUsed = false;
+                if (artifacts.length === 0 && totalAssistant > 0 && newArticles.length === 0) {
+                    fullAssistantRescanUsed = true;
+                    for (let idx = 0; idx < responseElements.length; idx++) {
+                        const before = artifacts.length;
+                        scanRoot(responseElements[idx], artifacts, seenCards);
+                        for (let k = before; k < artifacts.length; k++) {
+                            artifacts[k].assistantIndex = idx;
+                        }
+                    }
+                }
+
+                // Pass 2 (fallback): if still nothing, scan entire document body.
                 // Pro mode / canvas sometimes renders file cards outside the
                 // assistant article (e.g. side panel, attachment tray).
                 let fallbackUsed = false;
@@ -1093,7 +1117,9 @@ class ChatGPTWebAgent(WebAgent):
                     diagnostics: {
                         totalAssistantArticles: totalAssistant,
                         baselineSkipped: baseline,
+                        effectiveBaseline,
                         newArticlesScanned: newArticles.length,
+                        fullAssistantRescanUsed,
                         fallbackUsed,
                         fileKeywordSightings: sightings,
                     },
@@ -1107,9 +1133,17 @@ class ChatGPTWebAgent(WebAgent):
             logger.info(
                 f"Found {len(artifact_info)} artifact preview card(s) "
                 f"(fallback={diag['fallbackUsed']}, "
+                f"full_rescan={diag.get('fullAssistantRescanUsed', False)}, "
                 f"assistant_articles={diag['totalAssistantArticles']}, "
+                f"baseline={diag['baselineSkipped']}, "
                 f"new_scanned={diag['newArticlesScanned']})"
             )
+            if diag.get("fullAssistantRescanUsed"):
+                logger.warning(
+                    "Baseline-slice produced 0 articles but assistants exist — "
+                    "rescanned full assistant list (likely off-by-one race or "
+                    "stale baseline from a prior conversation)."
+                )
             if not artifact_info:
                 sightings = diag["fileKeywordSightings"]
                 if sightings:
@@ -1157,8 +1191,10 @@ class ChatGPTWebAgent(WebAgent):
                 card_html = info.get("containerHtml", "")
                 buttons = info.get("buttons", [])
                 found_via = info.get("foundVia", "?")
+                assistant_idx = info.get("assistantIndex", "?")
                 logger.info(
-                    f"Artifact card for {filename} (via {found_via}) has "
+                    f"Artifact card for {filename} (via {found_via}, "
+                    f"assistant_idx={assistant_idx}) has "
                     f"{len(buttons)} icon button(s):"
                 )
                 for b in buttons:
@@ -1429,6 +1465,18 @@ class ChatGPTWebAgent(WebAgent):
             if not await self.upload_files(files_to_upload):
                 logger.error("File upload failed")
                 return False
+
+        # Snapshot the assistant-article baseline BEFORE submitting the first
+        # prompt. Capturing it after submit (the previous behavior) races with
+        # ChatGPT mounting the empty assistant-turn shell on send — when the
+        # mount lands first, baseline is one too high and download_all_artifacts
+        # slices off the very article we want.
+        if not self._baseline_set:
+            self._baseline_article_count = await self._count_response_articles()
+            self._baseline_set = True
+            logger.info(
+                f"Baseline assistant articles before first submit: {self._baseline_article_count}"
+            )
 
         # Process each prompt
         for i, prompt in enumerate(prompts, 1):
