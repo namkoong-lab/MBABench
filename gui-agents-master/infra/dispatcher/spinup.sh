@@ -170,6 +170,39 @@ fi
 BOXES_FILE="$(cd "$(dirname "$0")" && pwd)/boxes.yaml"
 SSH_KEY_PATH="$HOME/.ssh/$KEY_NAME.pem"
 
+# Fast keypair-fingerprint check. If local pem and AWS-side keypair have
+# drifted (someone deleted+recreated the keypair on AWS, or the local pem
+# was replaced) every SSH/rsync op below fails as "Permission denied
+# (publickey)". Surface the real cause here instead of letting rsync at
+# L273 produce the cryptic version. Skipped silently if either side is
+# absent — the existing flow handles those.
+#
+# `aws ec2 create-key-pair` and `aws ec2 import-key-pair` use different
+# fingerprint formulas — SHA1 of PKCS8-DER private key vs MD5 of public-key
+# DER. Compute both forms locally and accept either match, otherwise an
+# imported keypair would falsely register as drift.
+if [[ -f "$SSH_KEY_PATH" ]]; then
+  _local_sha1="$(openssl pkcs8 -in "$SSH_KEY_PATH" -nocrypt -topk8 -outform DER 2>/dev/null \
+    | openssl sha1 -c 2>/dev/null | awk -F'= ' '{print $2}' | tr -d ' ' || true)"
+  _local_md5="$(openssl pkey -in "$SSH_KEY_PATH" -pubout -outform DER 2>/dev/null \
+    | openssl md5 -c 2>/dev/null | awk -F'= ' '{print $2}' | tr -d ' ' || true)"
+  _aws_fp="$(aws ec2 describe-key-pairs \
+      --region "$REGION" --key-names "$KEY_NAME" \
+      --query 'KeyPairs[0].KeyFingerprint' --output text 2>/dev/null || true)"
+  if [[ -n "$_aws_fp" && "$_aws_fp" != "None" \
+        && "$_aws_fp" != "$_local_sha1" \
+        && "$_aws_fp" != "$_local_md5" ]]; then
+    echo "local pem and AWS keypair '$KEY_NAME' have different fingerprints:" >&2
+    echo "    local SHA1 (create-key-pair form): $_local_sha1   ($SSH_KEY_PATH)" >&2
+    echo "    local MD5  (import-key-pair form): $_local_md5" >&2
+    echo "    AWS:                                $_aws_fp   (region=$REGION)" >&2
+    echo "  Every SSH op below would fail with 'Permission denied (publickey)'." >&2
+    echo "  Run ./infra/dispatcher/reset_keypair.sh to recover (terminates" >&2
+    echo "  any orphaned instances and regenerates the keypair)." >&2
+    exit 2
+  fi
+fi
+
 # ─── SSH helpers ────────────────────────────────────────────────────────────
 
 SSH_OPTS=(
