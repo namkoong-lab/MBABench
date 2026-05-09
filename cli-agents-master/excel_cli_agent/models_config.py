@@ -51,19 +51,25 @@ MODEL_PRICING = {
     "o4-mini": {"input": 4.00, "output": 16.00},
 
     # OpenRouter models (third-party via OpenRouter) - Updated Jan 2026
-    "moonshotai/kimi-k2-thinking": {"input": 0.57, "output": 2.42},
+    "moonshotai/kimi-k2-thinking": {"input": 0.60, "output": 2.50},
     "deepseek/deepseek-r1": {"input": 0.55, "output": 2.19},
     "deepseek/deepseek-v3-0324": {"input": 0.50, "output": 1.50},
     "deepseek/deepseek-v3.2": {"input": 0.25, "output": 0.38},
     "openai/gpt-5.2": {"input": 2.50, "output": 10.00},
     "openai/gpt-5.2-codex": {"input": 1.75, "output": 14.00},
     "openai/gpt-5.3-codex": {"input": 1.75, "output": 14.00},
+    "openai/gpt-5.4": {"input": 2.50, "output": 15.00},
+    "openai/gpt-5.4-mini": {"input": 0.75, "output": 4.50},
+    "openai/gpt-5.4-nano": {"input": 0.15, "output": 0.90},
+    "openai/gpt-5.4-pro": {"input": 30.00, "output": 180.00},
     "anthropic/claude-opus-4.5": {"input": 5.00, "output": 25.00},
     "anthropic/claude-opus-4.6": {"input": 5.00, "output": 25.00},
     "claude-opus-4-6": {"input": 5.00, "output": 25.00},  # Anthropic direct model ID
     "google/gemini-3-pro-preview": {"input": 1.25, "output": 10.00},
     "z-ai/glm-4.7": {"input": 0.40, "output": 1.50},
     "x-ai/grok-4": {"input": 3.00, "output": 15.00},
+    "x-ai/grok-4.20": {"input": 2.00, "output": 6.00},
+    "google/gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
     "mistralai/mistral-medium-3": {"input": 0.40, "output": 2.00},
     "mistralai/mistral-large-2512": {"input": 0.50, "output": 1.50},
     "qwen/qwen3-235b-a22b": {"input": 0.18, "output": 0.54},
@@ -71,7 +77,9 @@ MODEL_PRICING = {
     "qwen/qwen3-235b-a22b-thinking-2507": {"input": 0.11, "output": 0.60},
     "allenai/olmo-3.1-32b-think:free": {"input": 0.0, "output": 0.0},
     "allenai/olmo-3.1-32b-think": {"input": 0.15, "output": 0.50},
-    "moonshotai/kimi-k2.5": {"input": 0.60, "output": 2.50},
+    "allenai/olmo-3.1-32b-instruct": {"input": 0.20, "output": 0.60},
+    "qwen/qwen3.6-plus": {"input": 0.33, "output": 1.95},
+    "moonshotai/kimi-k2.5": {"input": 0.50, "output": 2.80},
     "qwen/qwen3.5-397b-a17b": {"input": 0.20, "output": 0.60},
 }
 

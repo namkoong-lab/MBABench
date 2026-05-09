@@ -1,0 +1,55 @@
+OUTPUT FILENAME REQUIREMENT (MANDATORY):
+You MUST create a file named exactly "solution.xlsx" in the workspace.
+This is NOT optional and NOT configurable. Validation will REJECT any other filename.
+Example: create_file(filename="solution.xlsx", worksheets=["Assumptions", "Workings", "Q1", ...])
+
+CRITICAL CIRCULAR REFERENCE PREVENTION:
+- NEVER use = prefix for constants (use 19999 not =19999)
+- NEVER use = prefix for text (use "Revenue" not ="Revenue")
+- ONLY use = prefix for calculations with set_cell_formula tool
+- ALWAYS check cell contents before referencing in formulas
+- NEVER reference cells containing text in mathematical formulas
+- NEVER create formulas where the cell is within its own range (e.g., B2: =SUM(B1:B5))
+
+FORMULA TOOL USAGE (CRITICAL):
+- ALWAYS use set_cell_formula for ANY formula (no exceptions)
+- NEVER use edit_cells for formulas - they will be stored as text and fail validation
+- edit_cells is ONLY for text labels and numeric constants, NOT formulas
+- For multiple formulas: use actions array with multiple set_cell_formula calls
+Example WRONG: edit_cells([{"cell": "B2", "value": "=SUM(A1:A10)"}])
+Example RIGHT: set_cell_formula({"cell": "B2", "formula": "SUM(A1:A10)"})
+
+STEP 1 - ANALYZE THE EXCEL FILE:
+This is a WSP (Wall Street Prep) task. There is NO PDF file.
+The questions and data are contained WITHIN the Excel file itself.
+Read ALL files listed in the ATTACHED EXCEL CONTEXT section above.
+Use summarize_workbook_context and describe_worksheet to understand the structure.
+
+STEP 2 - CREATE WORKSHEET STRUCTURE:
+Use descriptive worksheet names that reflect their content. Every sheet in the final workbook will be graded.
+
+For EACH question in the Excel file, create a dedicated worksheet:
+- If questions are Q1, Q2, Q3, Q4 → create sheets "Q1", "Q2", "Q3", "Q4"
+- If questions are grouped (e.g., "Q1-5", "Q6-11") → create sheets "Q1-5", "Q6-11"
+
+Additionally create sheets for inputs and calculations (e.g., "Assumptions", "Workings"):
+- An input/assumptions sheet with all input parameters (CONSTANTS ONLY, NO FORMULAS)
+- A workings/calculations sheet for complex calculations
+
+If the starting .xlsx file already contains sheets that need modification to satisfy the rubric, modify those original sheets directly.
+
+STEP 3 - BUILD CALCULATIONS:
+- Place all constants in your input/assumptions sheet using edit_cells (NO = prefix)
+- Place calculations in your workings/calculations sheet using set_cell_formula
+- In answer sheets, reference calculation sheet formulas, not text labels
+- Verify cell types before creating formulas
+
+STEP 4 - VALIDATION REQUIREMENTS:
+- Use validate_formula tool before setting complex formulas
+- Ensure no circular references
+- Ensure formulas only reference numeric cells, not text cells
+- Use appropriate Excel functions based on question type
+
+STEP 5 - FORMATTING (ONLY after Steps 1-4 verified):
+After ALL calculations are complete and answer sheets linked, apply formatting.
+Do NOT include formatting actions in the same batch as calculation actions.

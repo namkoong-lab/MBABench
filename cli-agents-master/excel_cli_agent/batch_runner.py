@@ -209,6 +209,7 @@ class BatchRunner:
                 use_anthropic_direct=self.config.get('use_anthropic_direct', False),
                 anthropic_api_key=self.config.get('anthropic_api_key', None),
                 thinking_budget_tokens=self.config.get('thinking_budget_tokens', None),
+                anthropic_effort=self.config.get('anthropic_effort', None),
                 use_openai_direct=self.config.get('use_openai_direct', False),
                 # Versioned system prompt path
                 system_prompt_path=self.config.get('system_prompt_path', None),
@@ -251,7 +252,12 @@ class BatchRunner:
 
             if task_execution.status == TaskStatus.COMPLETED:
                 result.status = "success"
-                print(f"✅ Workspace completed successfully")
+                # Preserve info messages (e.g., "Max iterations reached") even on success
+                if task_execution.error:
+                    result.error_message = task_execution.error
+                    print(f"✅ Workspace completed ({task_execution.error})")
+                else:
+                    print(f"✅ Workspace completed successfully")
             else:
                 result.status = "failed"
                 result.error_message = task_execution.error or f"Task status: {task_execution.status.value}"

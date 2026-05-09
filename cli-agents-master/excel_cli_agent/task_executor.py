@@ -60,6 +60,19 @@ class ExecutionStep:
 
 
 @dataclass
+class IterationSummary:
+    """Compact summary of one iteration for context delivery to the LLM."""
+    iteration_number: int
+    plan: str                             # Model's stated plan for this iteration
+    tool_counts: Dict[str, int]           # e.g. {"set_cell_formula": 40, "edit_cells": 5}
+    success_count: int
+    failure_count: int
+    cell_ranges: Dict[str, str]           # Per-sheet: {"Workings": "B4:M44"}
+    sample_values: List[str]              # e.g. ["B6=PMT(...)→$3,457"]
+    errors: List[str]                     # Deduplicated error messages
+
+
+@dataclass
 class TaskExecution:
     task_id: str
     user_prompt: str
@@ -80,7 +93,7 @@ class StreamTimeoutError(Exception):
 
 
 class ExcelTaskExecutor:
-    def __init__(self, excel_client: ExcelMCPClient, api_key: str, model: str = "gpt-5-nano-2025-08-07", custom_reasoning: bool = False, fresh_context_mode: bool = False, enhanced_excel_context: bool = True, recent_history_count: int = 5, max_completion_tokens: int = 65535, reasoning_effort: str = None, api_timeout_seconds: int = None, use_anthropic_direct: bool = False, anthropic_api_key: str = None, thinking_budget_tokens: int = None, use_openai_direct: bool = False, system_prompt_path: str = None, base_url: str = None):
+    def __init__(self, excel_client: ExcelMCPClient, api_key: str, model: str = "gpt-5-nano-2025-08-07", custom_reasoning: bool = False, fresh_context_mode: bool = False, enhanced_excel_context: bool = True, recent_history_count: int = 5, max_completion_tokens: int = 65535, reasoning_effort: str = None, api_timeout_seconds: int = None, use_anthropic_direct: bool = False, anthropic_api_key: str = None, thinking_budget_tokens: int = None, anthropic_effort: str = None, use_openai_direct: bool = False, system_prompt_path: str = None, base_url: str = None):
         self.excel_client = excel_client
 
         # --- Unified base_url routing ---
@@ -92,6 +105,7 @@ class ExcelTaskExecutor:
         self.use_openai_direct = False  # True when NOT using OpenRouter (affects reasoning_effort format)
         self.anthropic_client = None
         self.thinking_budget_tokens = thinking_budget_tokens
+        self.anthropic_effort = anthropic_effort  # "max", "high", "medium", "low" — uses adaptive thinking
 
         if self.base_url and "anthropic" in self.base_url.lower():
             # Anthropic-compatible endpoint
@@ -195,6 +209,10 @@ class ExcelTaskExecutor:
         self.context_pdfs: List[str] = []
         # Context Excel files
         self.context_excels: List[str] = []
+        # Context Excel cache (formatted text, avoids re-reading unchanged files)
+        self._context_excel_cache: Dict[str, str] = {}
+        # Iteration summaries for context delivery (replaces step-level history)
+        self._iteration_summaries: List[IterationSummary] = []
         # Iteration control
         self.default_max_iterations: int = 30
         # Snapshot mode: save solution.xlsx + AI context text after each iteration
@@ -299,20 +317,26 @@ class ExcelTaskExecutor:
         return "\n".join(all_text)
 
     def _extract_excel_texts(self) -> str:
-        """Extract data from all context Excel files using enhanced grid format"""
+        """Extract data from all context Excel files using enhanced grid format.
+
+        Context Excel files never change during a task, so results are cached
+        after the first call to avoid redundant load_workbook calls per iteration.
+        """
         if not self.context_excels:
             return ""
 
         if self.enhanced_excel_context:
-            # Use enhanced grid format for better context understanding
             all_text = []
             for excel_path in self.context_excels:
-                grid_text = self._format_excel_as_grid(excel_path, is_solution=False)
-                all_text.append(grid_text)
+                if excel_path not in self._context_excel_cache:
+                    self._context_excel_cache[excel_path] = self._format_excel_as_grid(excel_path, is_solution=False, smart_truncate=False)
+                all_text.append(self._context_excel_cache[excel_path])
             return "\n".join(all_text)
         else:
-            # Fallback to legacy CSV-like format
-            return self._extract_excel_texts_legacy()
+            cache_key = "legacy:" + "|".join(self.context_excels)
+            if cache_key not in self._context_excel_cache:
+                self._context_excel_cache[cache_key] = self._extract_excel_texts_legacy()
+            return self._context_excel_cache[cache_key]
 
     def _extract_excel_texts_legacy(self) -> str:
         """Legacy CSV-like Excel text extraction (for backward compatibility)"""
@@ -376,7 +400,122 @@ class ExcelTaskExecutor:
 
         return "\n".join(all_text)
 
-    def _format_excel_as_grid(self, excel_path: str, is_solution: bool = False) -> str:
+    def _is_formula_heavy_sheet(self, sheet, sheet_name: str, is_solution: bool) -> bool:
+        """Check if a sheet should always get full grid dump (not summarized).
+
+        Returns True for sheets the model needs to see in full:
+        - Formula-heavy sheets (>10% formulas) — model's own work
+        - Solution Workings/calculation sheets
+        - Q/answer sheets
+        """
+        # Q/answer sheets — always show in full
+        if sheet_name.startswith('Q') and len(sheet_name) <= 6:
+            return True
+        # Common working/calculation sheet names in solution files
+        if is_solution and any(kw in sheet_name.lower() for kw in ('working', 'calc', 'model', 'summary', 'output', 'result')):
+            return True
+        # Check formula density — sample first 100 rows
+        formula_count = 0
+        cell_count = 0
+        for row in sheet.iter_rows(max_row=min(sheet.max_row or 0, 100)):
+            for cell in row:
+                if cell.value is not None:
+                    cell_count += 1
+                    if isinstance(cell.value, str) and cell.value.startswith('='):
+                        formula_count += 1
+        if cell_count > 0 and formula_count / cell_count > 0.10:
+            return True
+        return False
+
+    def _format_sheet_summary(self, sheet, data_sheet, sheet_name: str, actual_max_row: int, actual_max_col: int) -> str:
+        """Format a large data sheet as a compact summary instead of full grid.
+
+        Shows: header row, first 5 data rows, last row, column summary with types/ranges.
+        Used for sheets >50 rows that are pure data (not formula-heavy).
+        """
+        from openpyxl.utils import get_column_letter
+
+        parts = []
+
+        def format_row(row_num):
+            """Format a single row in the same style as the full grid."""
+            row_cells = []
+            for col in range(1, actual_max_col + 1):
+                col_letter = get_column_letter(col)
+                cell_addr = f"{col_letter}{row_num}"
+                formula_cell = sheet.cell(row=row_num, column=col)
+                data_cell = data_sheet.cell(row=row_num, column=col)
+                formula_value = formula_cell.value
+                calculated_value = data_cell.value
+                if formula_value is None:
+                    continue
+                if isinstance(formula_value, str) and formula_value.startswith('='):
+                    cell_display = formula_value
+                    cell_type = f"[={calculated_value}]" if calculated_value is not None else "[formula]"
+                elif isinstance(formula_value, (int, float)):
+                    cell_display = str(formula_value)
+                    cell_type = "[number]"
+                else:
+                    cell_display = f'"{str(formula_value)}"'
+                    cell_type = "[text]"
+                row_cells.append(f"{cell_addr}: {cell_display} {cell_type}")
+            return f"  {' | '.join(row_cells)}\n" if row_cells else ""
+
+        # Header + first 5 data rows
+        sample_rows = min(6, actual_max_row)
+        for r in range(1, sample_rows + 1):
+            parts.append(format_row(r))
+
+        # Ellipsis with count
+        remaining = actual_max_row - sample_rows - 1  # minus last row
+        if remaining > 0:
+            parts.append(f"  ... ({remaining} more data rows) ...\n")
+
+        # Last row (often totals or last data point)
+        if actual_max_row > sample_rows:
+            parts.append(format_row(actual_max_row))
+
+        # Column summary: header, data type, min/max for numeric columns
+        parts.append("\nColumn Summary:\n")
+        for col in range(1, actual_max_col + 1):
+            col_letter = get_column_letter(col)
+            header_cell = sheet.cell(row=1, column=col)
+            header = str(header_cell.value) if header_cell.value is not None else col_letter
+
+            # Scan data column for type and range (use data_sheet for computed values)
+            numeric_vals = []
+            text_count = 0
+            formula_count = 0
+            for row in range(2, actual_max_row + 1):
+                fv = sheet.cell(row=row, column=col).value
+                dv = data_sheet.cell(row=row, column=col).value
+                if fv is None:
+                    continue
+                if isinstance(fv, str) and fv.startswith('='):
+                    formula_count += 1
+                    if isinstance(dv, (int, float)):
+                        numeric_vals.append(dv)
+                elif isinstance(fv, (int, float)):
+                    numeric_vals.append(fv)
+                else:
+                    text_count += 1
+
+            data_rows = actual_max_row - 1
+            if numeric_vals:
+                min_v = min(numeric_vals)
+                max_v = max(numeric_vals)
+                parts.append(f'  {col_letter}: "{header}" — {len(numeric_vals)} numbers (range: {min_v} to {max_v})')
+                if formula_count > 0:
+                    parts.append(f' [{formula_count} formulas]')
+                parts.append('\n')
+            elif text_count > 0:
+                parts.append(f'  {col_letter}: "{header}" — {text_count} text values\n')
+            elif formula_count > 0:
+                parts.append(f'  {col_letter}: "{header}" — {formula_count} formulas\n')
+
+        return "".join(parts)
+
+    def _format_excel_as_grid(self, excel_path: str, is_solution: bool = False, smart_truncate: bool = True) -> str:
         """Format Excel file as grid with column letters + row numbers
 
         Used for both:
@@ -384,10 +523,12 @@ class ExcelTaskExecutor:
         - context Excel files (enhanced context)
 
         Shows all non-empty cells with full formula text and computed values.
+        Large data-only sheets (>50 KB of grid text) are summarized when smart_truncate=True.
 
         Args:
             excel_path: Path to Excel file
             is_solution: True if this is solution.xlsx, False for context files
+            smart_truncate: If True, summarize large data-only sheets (>50 rows)
 
         Returns:
             Formatted grid text with column letters and row numbers
@@ -429,60 +570,82 @@ class ExcelTaskExecutor:
 
                 used_range = f"{get_column_letter(1)}{1}:{get_column_letter(actual_max_col)}{actual_max_row}"
                 text_parts.append(f"\n=== WORKSHEET: {sheet_name} ===\n")
-                text_parts.append(f"Used Range: {used_range}\n")
 
-                # Create grid display with column letters + row numbers
-                for row in range(1, actual_max_row + 1):
-                    row_cells = []
-                    for col in range(1, actual_max_col + 1):
-                        col_letter = get_column_letter(col)
-                        cell_addr = f"{col_letter}{row}"
+                # Decide whether to summarize this sheet based on grid text size.
+                # Estimate grid KB: count non-empty cells and approximate text size.
+                # Only summarize truly massive data sheets (>50 KB of grid text).
+                should_summarize = False
+                if smart_truncate and not self._is_formula_heavy_sheet(sheet, sheet_name, is_solution):
+                    est_chars = 0
+                    for _row in sheet.iter_rows(min_row=1, max_row=actual_max_row, max_col=actual_max_col):
+                        for _cell in _row:
+                            if _cell.value is not None:
+                                est_chars += len(str(_cell.value)) + 15  # addr + type tag overhead
+                    should_summarize = est_chars > 50 * 1024  # 50 KB threshold
 
-                        # Get formula and calculated value
-                        formula_cell = sheet.cell(row=row, column=col)
-                        data_cell = data_sheet.cell(row=row, column=col)
+                if should_summarize:
+                    text_parts.append(f"Used Range: {used_range} ({actual_max_row} rows × {actual_max_col} columns)\n")
+                    # Count formulas in this sheet for the total
+                    for row in sheet.iter_rows():
+                        for cell in row:
+                            if isinstance(cell.value, str) and cell.value.startswith('='):
+                                total_formulas += 1
+                    text_parts.append(self._format_sheet_summary(sheet, data_sheet, sheet_name, actual_max_row, actual_max_col))
+                else:
+                    text_parts.append(f"Used Range: {used_range}\n")
 
-                        formula_value = formula_cell.value
-                        calculated_value = data_cell.value
+                    # Create grid display with column letters + row numbers
+                    for row in range(1, actual_max_row + 1):
+                        row_cells = []
+                        for col in range(1, actual_max_col + 1):
+                            col_letter = get_column_letter(col)
+                            cell_addr = f"{col_letter}{row}"
 
-                        if formula_value is None:
-                            continue  # Skip empty cells entirely
+                            # Get formula and calculated value
+                            formula_cell = sheet.cell(row=row, column=col)
+                            data_cell = data_sheet.cell(row=row, column=col)
 
-                        cell_type = ""
-                        if isinstance(formula_value, str) and formula_value.startswith('='):
-                            # It's a formula
-                            total_formulas += 1
-                            # Check for potential circular reference
-                            self_ref_patterns = [
-                                f"'{sheet_name}'!{cell_addr}",  # 'Sheet'!B2
-                                f"{sheet_name}!{cell_addr}",    # Sheet!B2
-                            ]
-                            if any(pattern in formula_value for pattern in self_ref_patterns):
-                                circular_refs_detected.append(f"{sheet_name}!{cell_addr}")
-                            elif "!" not in formula_value:
-                                import re
-                                cell_refs = re.findall(r'\b[A-Z]{1,3}\d+\b', formula_value)
-                                if cell_addr in cell_refs:
+                            formula_value = formula_cell.value
+                            calculated_value = data_cell.value
+
+                            if formula_value is None:
+                                continue  # Skip empty cells entirely
+
+                            cell_type = ""
+                            if isinstance(formula_value, str) and formula_value.startswith('='):
+                                # It's a formula
+                                total_formulas += 1
+                                # Check for potential circular reference
+                                self_ref_patterns = [
+                                    f"'{sheet_name}'!{cell_addr}",  # 'Sheet'!B2
+                                    f"{sheet_name}!{cell_addr}",    # Sheet!B2
+                                ]
+                                if any(pattern in formula_value for pattern in self_ref_patterns):
                                     circular_refs_detected.append(f"{sheet_name}!{cell_addr}")
-                            cell_display = formula_value
-                            # Show computed value if available
-                            if calculated_value is not None:
-                                cell_type = f"[={calculated_value}]"
+                                elif "!" not in formula_value:
+                                    import re
+                                    cell_refs = re.findall(r'\b[A-Z]{1,3}\d+\b', formula_value)
+                                    if cell_addr in cell_refs:
+                                        circular_refs_detected.append(f"{sheet_name}!{cell_addr}")
+                                cell_display = formula_value
+                                # Show computed value if available
+                                if calculated_value is not None:
+                                    cell_type = f"[={calculated_value}]"
+                                else:
+                                    cell_type = "[formula]"
+                            elif isinstance(formula_value, (int, float)):
+                                cell_display = str(formula_value)
+                                cell_type = "[number]"
                             else:
-                                cell_type = "[formula]"
-                        elif isinstance(formula_value, (int, float)):
-                            cell_display = str(formula_value)
-                            cell_type = "[number]"
-                        else:
-                            # String or other value
-                            cell_display = f'"{str(formula_value)}"'
-                            cell_type = "[text]"
+                                # String or other value
+                                cell_display = f'"{str(formula_value)}"'
+                                cell_type = "[text]"
 
-                        row_cells.append(f"{cell_addr}: {cell_display} {cell_type}")
+                            row_cells.append(f"{cell_addr}: {cell_display} {cell_type}")
 
-                    # Only show rows that have non-empty cells
-                    if row_cells:
-                        text_parts.append(f"  {' | '.join(row_cells)}\n")
+                        # Only show rows that have non-empty cells
+                        if row_cells:
+                            text_parts.append(f"  {' | '.join(row_cells)}\n")
 
                 # Check for Q sheets without formulas
                 if sheet_name.startswith('Q') and sheet_name[1:].isdigit():
@@ -525,7 +688,7 @@ class ExcelTaskExecutor:
         if not solution_path.exists():
             return "\n=== SOLUTION FILE ===\nNo solution.xlsx found yet. Create it to begin building your Excel model.\n"
 
-        return self._format_excel_as_grid(str(solution_path), is_solution=True)
+        return self._format_excel_as_grid(str(solution_path), is_solution=True, smart_truncate=False)
 
     def _save_iteration_snapshot(self, iteration: int, task: TaskExecution = None):
         """Save solution.xlsx copy and the EXACT prompt the AI saw for this iteration."""
@@ -669,7 +832,7 @@ class ExcelTaskExecutor:
             signal.alarm(0)  # Cancel alarm
             signal.signal(signal.SIGALRM, old_handler)
 
-    def _call_anthropic_api(self, system_prompt: str, user_message: str, task: 'TaskExecution') -> Tuple[str, dict]:
+    def _call_anthropic_api(self, system_prompt: str, user_message: str, task: 'TaskExecution', static_context: str = "") -> Tuple[str, dict]:
         """Call Anthropic API directly with extended thinking support using streaming.
 
         Streaming is required for extended thinking operations that may take >10 minutes.
@@ -687,16 +850,33 @@ class ExcelTaskExecutor:
 
         # Build the request
         # Anthropic uses max_tokens for output limit
-        # For extended thinking, we need thinking.budget_tokens
         request_kwargs = {
-            "model": self.model,  # e.g., "claude-opus-4-5-20251101"
+            "model": self.model,  # e.g., "claude-opus-4-6"
             "max_tokens": self.max_completion_tokens,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_message}]
+            "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         }
 
-        # Add extended thinking if budget is set
-        if self.thinking_budget_tokens:
+        # Build user message with prompt caching
+        # Static context (task prompt + PDFs + starting Excel) is cached, dynamic context is fresh
+        if static_context and len(static_context) > 1000:
+            # Split into cached static block + fresh dynamic block
+            dynamic_context = user_message[len(static_context):] if user_message.startswith(static_context) else user_message
+            request_kwargs["messages"] = [{"role": "user", "content": [
+                {"type": "text", "text": static_context, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": dynamic_context},
+            ]}]
+            print(f"📦 Prompt caching: static={len(static_context)//4:,}tok + dynamic={len(dynamic_context)//4:,}tok")
+        else:
+            request_kwargs["messages"] = [{"role": "user", "content": user_message}]
+
+        # Add thinking configuration
+        if self.anthropic_effort:
+            # Adaptive thinking with effort level (recommended for Opus 4.6+)
+            request_kwargs["thinking"] = {"type": "adaptive"}
+            request_kwargs["output_config"] = {"effort": self.anthropic_effort}
+            print(f"🧠 Anthropic adaptive thinking: effort={self.anthropic_effort}")
+        elif self.thinking_budget_tokens:
+            # Legacy manual thinking budget (deprecated but still functional)
             request_kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": self.thinking_budget_tokens
@@ -712,6 +892,8 @@ class ExcelTaskExecutor:
             thinking_text = ""
             input_tokens = 0
             output_tokens = 0
+            cache_creation_tokens = 0
+            cache_read_tokens = 0
 
             with self.anthropic_client.messages.stream(**request_kwargs) as stream:
                 for event in stream:
@@ -731,19 +913,35 @@ class ExcelTaskExecutor:
                                 output_tokens = event.usage.output_tokens
                         elif event.type == 'message_start':
                             if hasattr(event, 'message') and hasattr(event.message, 'usage'):
-                                input_tokens = event.message.usage.input_tokens
+                                usage = event.message.usage
+                                input_tokens = usage.input_tokens
+                                cache_creation_tokens = getattr(usage, 'cache_creation_input_tokens', 0) or 0
+                                cache_read_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
 
             elapsed = time.time() - start_time
             print(f"✅ Anthropic response received in {elapsed:.1f}s")
 
+            if cache_creation_tokens or cache_read_tokens:
+                print(f"💾 Cache: wrote={cache_creation_tokens:,} read={cache_read_tokens:,} uncached={input_tokens:,}")
+
             if thinking_text:
-                print(f"💭 Extended thinking: {len(thinking_text)} chars")
+                thinking_tokens = len(thinking_text) // 4  # rough estimate: 4 chars/token
+                print(f"💭 Extended thinking: {len(thinking_text)} chars (~{thinking_tokens} tokens)")
+                # Save thinking trace to separate file (not transcript — too bloated)
+                thinking_file = self.logs_dir / "thinking_trace.md"
+                with open(thinking_file, "a", encoding="utf-8") as tf:
+                    tf.write(f"\n## Iteration {task.total_iterations}\n\n")
+                    tf.write(thinking_text)
+                    tf.write("\n\n---\n")
 
             # Build usage info
             usage_info = {
                 "prompt_tokens": input_tokens,
                 "completion_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens
+                "total_tokens": input_tokens + output_tokens,
+                "thinking_text": thinking_text,
+                "cache_creation_input_tokens": cache_creation_tokens,
+                "cache_read_input_tokens": cache_read_tokens,
             }
 
             # Log the request (adapted for Anthropic format)
@@ -762,9 +960,22 @@ class ExcelTaskExecutor:
             prompt_tokens = usage_info.get("prompt_tokens", 0)
             completion_tokens = usage_info.get("completion_tokens", 0)
             total_tokens = usage_info.get("total_tokens", 0)
+            thinking_text = usage_info.get("thinking_text", "")
+            thinking_chars = len(thinking_text) if thinking_text else 0
+            cache_creation = usage_info.get("cache_creation_input_tokens", 0)
+            cache_read = usage_info.get("cache_read_input_tokens", 0)
 
-            # Calculate cost (Opus 4.5 pricing: $5/MTok input, $25/MTok output)
-            cost_usd = (prompt_tokens / 1_000_000 * 5.0) + (completion_tokens / 1_000_000 * 25.0)
+            # Calculate cost with cache-aware pricing (Opus 4.6)
+            # input_tokens = uncached input (charged at $5/MTok)
+            # cache_creation = first-time cached input (charged at $6.25/MTok)
+            # cache_read = cached input hit (charged at $0.50/MTok)
+            # completion_tokens = output including thinking (charged at $25/MTok)
+            cost_usd = (
+                (prompt_tokens / 1_000_000 * 5.0) +
+                (cache_creation / 1_000_000 * 6.25) +
+                (cache_read / 1_000_000 * 0.50) +
+                (completion_tokens / 1_000_000 * 25.0)
+            )
 
             # Accumulate cost on the current execution
             if self.current_execution:
@@ -775,7 +986,8 @@ class ExcelTaskExecutor:
                 writer.writerow([
                     datetime.now().isoformat(),
                     request.get("model", "unknown"),
-                    prompt_tokens, completion_tokens, total_tokens, f"{cost_usd:.6f}"
+                    prompt_tokens, completion_tokens, total_tokens, f"{cost_usd:.6f}",
+                    thinking_chars, cache_creation, cache_read
                 ])
         except Exception as e:
             print(f"⚠️ Failed to log Anthropic request: {e}")
@@ -793,6 +1005,7 @@ class ExcelTaskExecutor:
         import time as time_module
 
         response_text = ""
+        reasoning_text = ""
         usage_info = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         start_time = time_module.time()
         last_content_time = start_time
@@ -818,8 +1031,7 @@ class ExcelTaskExecutor:
                             has_content = True
                         # For thinking models, reasoning tokens come through delta.reasoning
                         if hasattr(delta, 'reasoning') and delta.reasoning:
-                            # Don't add reasoning to response_text (it's internal thinking)
-                            # But count it as activity to prevent idle timeout
+                            reasoning_text += delta.reasoning
                             has_content = True
 
                     if has_content:
@@ -846,6 +1058,16 @@ class ExcelTaskExecutor:
         except Exception as e:
             print(f"⚠️ Stream error: {e}, returning partial response ({len(response_text)} chars)")
 
+        if reasoning_text:
+            print(f"💭 Reasoning: {len(reasoning_text)} chars")
+            # Save reasoning trace to separate file
+            thinking_file = self.logs_dir / "thinking_trace.md"
+            with open(thinking_file, "a", encoding="utf-8") as tf:
+                tf.write(f"\n## Iteration {usage_info.get('iteration', '?')}\n\n")
+                tf.write(reasoning_text)
+                tf.write("\n\n---\n")
+            usage_info["thinking_text"] = reasoning_text
+
         return response_text, usage_info
 
     def _log_streaming_request(self, request_data: dict, response_text: str, usage_info: dict, task_id: str = "", iteration: int = 0):
@@ -870,6 +1092,8 @@ class ExcelTaskExecutor:
             prompt_tokens = usage_info.get('prompt_tokens', 0)
             completion_tokens = usage_info.get('completion_tokens', 0)
             total_tokens = usage_info.get('total_tokens', 0)
+            thinking_text = usage_info.get('thinking_text', '')
+            thinking_chars = len(thinking_text) if thinking_text else 0
 
             # Calculate cost
             cost_usd = calculate_cost(model, prompt_tokens, completion_tokens)
@@ -882,7 +1106,8 @@ class ExcelTaskExecutor:
                 timestamp, task_id, iteration, model,
                 messages, tools, tool_choice,
                 response_content, tool_calls, finish_reason,
-                prompt_tokens, completion_tokens, total_tokens, f"{cost_usd:.6f}"
+                prompt_tokens, completion_tokens, total_tokens, f"{cost_usd:.6f}",
+                thinking_chars
             ])
 
     def _get_system_prompt(self) -> str:
@@ -897,11 +1122,11 @@ class ExcelTaskExecutor:
 
             # Add JSON format instructions based on custom_reasoning flag
             if not self.custom_reasoning:
-                # Compact format without reasoning field (saves tokens)
-                prompt += "\n\n## JSON RESPONSE FORMAT (COMPACT)\n"
-                prompt += "Respond with JSON in this exact format (NO 'reasoning' field to save tokens):\n"
-                prompt += '{"is_complete": boolean, "actions": [{"tool": "tool_name", "parameters": {...}}]}\n'
-                prompt += "The 'reasoning' field is OMITTED to reduce token usage and avoid context limits.\n"
+                # Compact format with lightweight plan field for iteration continuity
+                prompt += "\n\n## JSON RESPONSE FORMAT\n"
+                prompt += "Respond with JSON in this exact format:\n"
+                prompt += '{"plan": "brief next-step note", "is_complete": boolean, "actions": [{"tool": "tool_name", "parameters": {...}}]}\n'
+                prompt += 'The "plan" field is a SHORT (max 20 words) note about what you intend to do next iteration, e.g. "Link Q sheets to Workings calculations" or "Apply formatting to output sheets". This helps maintain continuity between iterations.\n'
             else:
                 # Verbose format with reasoning field
                 prompt += "\n\n## JSON RESPONSE FORMAT (WITH REASONING)\n"
@@ -922,41 +1147,28 @@ class ExcelTaskExecutor:
             return self._get_traditional_context_prompt(task)
 
     def _get_fresh_context_prompt(self, task: TaskExecution) -> str:
-        """Generate fresh context prompt with current file state and recent tool call history"""
-        context = f"""CURRENT TASK: {task.user_prompt}
-ITERATION: {task.total_iterations}/{task.max_iterations}
+        """Generate fresh context prompt with current file state and recent tool call history.
+        Returns the full combined context (for OpenAI/OpenRouter single-string API)."""
+        static, dynamic = self._get_fresh_context_parts(task)
+        return static + "\n\n" + dynamic
 
-{self._load_solution_context()}
-"""
+    def _get_fresh_context_parts(self, task: TaskExecution) -> Tuple[str, str]:
+        """Split fresh context into static (cacheable) and dynamic parts.
 
-        # Add recent tool call history (last N calls)
-        if self.recent_history_count > 0 and task.steps:
-            recent_steps = task.steps[-self.recent_history_count:]
-            context += f"\n=== RECENT ACTIONS (last {len(recent_steps)}) ===\n"
-            for step in recent_steps:
-                status_icon = "✅" if not step.error else "❌"
-                context += f"\n{status_icon} Step {step.step_number}: {step.tool_name}\n"
-                # Show tool arguments (compact)
-                args_str = json.dumps(step.tool_args, separators=(',', ':'))
-                if len(args_str) > 150:
-                    args_str = args_str[:147] + "..."
-                context += f"   Args: {args_str}\n"
-                # Show result summary
-                if step.error:
-                    context += f"   Error: {step.error[:100]}\n"
-                elif step.result:
-                    result_str = str(step.result.get('result', ''))
-                    if len(result_str) > 150:
-                        result_str = result_str[:147] + "..."
-                    context += f"   Result: {result_str}\n"
-            context += "\n"
+        Static: task prompt, PDF headers, Excel context headers (content added later).
+        Dynamic: iteration number, solution grid, iteration history.
 
-        # Note: PDF files are attached to this request as multimodal content
+        Returns (static_context, dynamic_context).
+        """
+        # --- STATIC PART (same every iteration, cacheable) ---
+        static = f"CURRENT TASK: {task.user_prompt}\n"
+
+        # PDF headers
         if self.context_pdfs:
-            context += f"\n\n=== ATTACHED PDFs ({len(self.context_pdfs)}) ===\n"
+            static += f"\n\n=== ATTACHED PDFs ({len(self.context_pdfs)}) ===\n"
             for pdf_path in self.context_pdfs:
-                context += f"- {Path(pdf_path).name}\n"
-            context += """
+                static += f"- {Path(pdf_path).name}\n"
+            static += """
 🔥 IMPORTANT - PDF TEXT IS EMBEDDED BELOW! 🔥
 The extracted text from these PDFs will appear below in sections marked like this:
 
@@ -972,18 +1184,25 @@ The extracted text from these PDFs will appear below in sections marked like thi
 ============================================================
 """
 
-        # Enhanced Excel context files (if any)
+        # Excel context headers
         if self.context_excels:
-            context += f"\n\n=== ATTACHED EXCEL CONTEXT ({len(self.context_excels)}) ===\n"
+            static += f"\n\n=== ATTACHED EXCEL CONTEXT ({len(self.context_excels)}) ===\n"
             for excel_path in self.context_excels:
-                context += f"- {Path(excel_path).name}\n"
-            # Note: Enhanced Excel context will be added at the end via _extract_excel_texts()
+                static += f"- {Path(excel_path).name}\n"
 
-        context += f"\n🎯 FOCUS: Use the current file state above to determine your next action."
-        context += f"\n💡 TIP: You can see exactly what's in each cell with column letters and row numbers."
-        context += f"\n⚠️  CRITICAL: Never reference the same cell you're putting a formula in (circular reference)."
+        # --- DYNAMIC PART (changes every iteration) ---
+        dynamic = f"ITERATION: {task.total_iterations}/{task.max_iterations}\n\n"
+        dynamic += self._load_solution_context()
 
-        return context
+        # Iteration history
+        if self.recent_history_count > 0 and self._iteration_summaries:
+            dynamic += self._format_iteration_history()
+
+        dynamic += f"\n🎯 FOCUS: Use the current file state above to determine your next action."
+        dynamic += f"\n💡 TIP: You can see exactly what's in each cell with column letters and row numbers."
+        dynamic += f"\n⚠️  CRITICAL: Never reference the same cell you're putting a formula in (circular reference)."
+
+        return static, dynamic
 
     def _get_traditional_context_prompt(self, task: TaskExecution) -> str:
         """Generate traditional context prompt with execution history"""
@@ -1027,7 +1246,10 @@ EXECUTION HISTORY:
             context += f"\nStep {step.step_number}: {step.description}"
             context += f"\n  Tool: {step.tool_name}({step.tool_args})"
             if step.result:
-                context += f"\n  Result: {json.dumps(step.result.get('result', 'No result'), indent=2)[:500]}..."
+                if isinstance(step.result, dict):
+                    context += f"\n  Result: {json.dumps(step.result.get('result', 'No result'), indent=2)[:500]}..."
+                else:
+                    context += f"\n  Result: {json.dumps(step.result, indent=2)[:500]}..."
             if step.error:
                 context += f"\n  Error: {step.error}"
 
@@ -1056,7 +1278,7 @@ EXECUTION HISTORY:
             # Check if they all failed or had no useful result
             all_failed = all(
                 s.error or
-                (s.result and (
+                (s.result and isinstance(s.result, dict) and (
                     s.result.get('result') == [] or
                     s.result.get('result') == {} or
                     not s.result.get('success')
@@ -1066,6 +1288,146 @@ EXECUTION HISTORY:
             return all_failed
 
         return False
+
+    def _build_iteration_summary(self, iteration_num: int, steps: List[ExecutionStep]) -> IterationSummary:
+        """Build a compact summary of one iteration from its execution steps."""
+        from collections import Counter
+        import re as _re
+
+        # Extract plan from the first step's reasoning_json
+        plan = ""
+        for s in steps:
+            if s.reasoning_json:
+                plan = s.reasoning_json.get("plan", "") or s.reasoning_json.get("reasoning", "")
+                if len(plan) > 100:
+                    plan = plan[:97] + "..."
+                break
+
+        # Tool counts
+        tool_counts = dict(Counter(s.tool_name for s in steps))
+        success_count = sum(1 for s in steps if not s.error)
+        failure_count = sum(1 for s in steps if s.error)
+
+        # Cell ranges per sheet (for set_cell_formula and edit_cells)
+        sheet_cells: Dict[str, List[str]] = {}
+        sample_values: List[str] = []
+
+        for s in steps:
+            if s.tool_name not in ("set_cell_formula", "edit_cells"):
+                continue
+            if not isinstance(s.tool_args, dict):
+                continue
+            ws = s.tool_args.get("worksheet_name", "")
+            cell = s.tool_args.get("cell", "")
+            if ws and cell:
+                sheet_cells.setdefault(ws, []).append(cell)
+
+            # Extract sample calculated values from set_cell_formula results
+            if s.tool_name == "set_cell_formula" and not s.error and len(sample_values) < 3:
+                result = s.result.get("result", {}) if s.result and isinstance(s.result, dict) else {}
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except (json.JSONDecodeError, TypeError):
+                        result = {}
+                if isinstance(result, dict):
+                    calc_val = result.get("calculated_value")
+                    formula = s.tool_args.get("formula", "")
+                    cell_addr = s.tool_args.get("cell", "?")
+                    if calc_val is not None and calc_val != "Not available (open file in Excel to calculate)":
+                        formula_short = formula[:30] + "..." if len(formula) > 30 else formula
+                        sample_values.append(f"{cell_addr}={formula_short}→{calc_val}")
+
+        # Compute bounding cell ranges per sheet
+        cell_ranges: Dict[str, str] = {}
+        for ws, cells in sheet_cells.items():
+            if not cells:
+                continue
+            # Parse cell addresses to find bounding range
+            min_col = min_row = float('inf')
+            max_col = max_row = 0
+            for c in cells:
+                m = _re.match(r'([A-Z]+)(\d+)', c)
+                if m:
+                    col_str, row_str = m.groups()
+                    col_num = sum((ord(ch) - 64) * (26 ** i) for i, ch in enumerate(reversed(col_str)))
+                    row_num = int(row_str)
+                    min_col = min(min_col, col_num)
+                    max_col = max(max_col, col_num)
+                    min_row = min(min_row, row_num)
+                    max_row = max(max_row, row_num)
+            if min_col != float('inf'):
+                from openpyxl.utils import get_column_letter
+                cell_ranges[ws] = f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+
+        # Deduplicate errors with counts
+        error_counter = Counter()
+        for s in steps:
+            if s.error:
+                err_key = s.error[:80]
+                error_counter[err_key] += 1
+        errors = []
+        for err, count in error_counter.most_common(3):
+            if count > 1:
+                errors.append(f"{err} (x{count})")
+            else:
+                errors.append(err)
+
+        return IterationSummary(
+            iteration_number=iteration_num,
+            plan=plan,
+            tool_counts=tool_counts,
+            success_count=success_count,
+            failure_count=failure_count,
+            cell_ranges=cell_ranges,
+            sample_values=sample_values,
+            errors=errors,
+        )
+
+    def _format_iteration_history(self) -> str:
+        """Format recent iteration summaries for the LLM context."""
+        if not self._iteration_summaries:
+            return ""
+
+        count = min(self.recent_history_count, len(self._iteration_summaries))
+        recent = self._iteration_summaries[-count:]
+        total = len(self._iteration_summaries)
+
+        parts = [f"\n=== ITERATION HISTORY (last {count} of {total}) ===\n"]
+
+        for summary in recent:
+            parts.append(f"\n--- Iteration {summary.iteration_number} ---\n")
+            if summary.plan:
+                parts.append(f"Plan: {summary.plan}\n")
+
+            # Actions line: group by tool with sheet ranges
+            action_parts = []
+            for tool, cnt in summary.tool_counts.items():
+                if tool in summary.cell_ranges or tool == "set_cell_formula" or tool == "edit_cells":
+                    # Show with sheet range info
+                    ranges = [f"{ws} {rng}" for ws, rng in summary.cell_ranges.items()]
+                    range_str = f" ({', '.join(ranges)})" if ranges else ""
+                    action_parts.append(f"{cnt} {tool}{range_str}")
+                else:
+                    action_parts.append(f"{cnt} {tool}")
+            parts.append(f"Actions: {', '.join(action_parts)}\n")
+
+            # Results
+            total_actions = summary.success_count + summary.failure_count
+            parts.append(f"Results: {summary.success_count}/{total_actions} succeeded")
+            if summary.failure_count > 0:
+                parts.append(f", {summary.failure_count} failed")
+            parts.append("\n")
+
+            # Sample values
+            if summary.sample_values:
+                parts.append(f"Values: {' | '.join(summary.sample_values)}\n")
+
+            # Errors
+            if summary.errors:
+                parts.append(f"Errors: {'; '.join(summary.errors)}\n")
+
+        return "".join(parts)
 
     def _call_reasoning_engine(self, task: TaskExecution) -> Tuple[Dict[str, Any], str]:
         """Call OpenAI to determine next action.
@@ -1096,8 +1458,19 @@ EXECUTION HISTORY:
 
             # Use Anthropic direct API if configured (for Claude models with extended thinking)
             if self.use_anthropic_direct:
+                # Build reordered message for prompt caching:
+                # Static prefix (cached): task prompt + PDF text + starting Excel data
+                # Dynamic suffix (fresh): iteration number + solution grid + history
+                static_context = ""
+                if self.fresh_context_mode and additional_context:
+                    static_part, dynamic_part = self._get_fresh_context_parts(task)
+                    static_context = static_part + additional_context
+                    # Reorder: static first (cacheable), then dynamic
+                    user_message_content = static_context + "\n\n" + dynamic_part
+                    self._last_user_message = user_message_content
                 response_text, usage_info = self._call_anthropic_api(
-                    system_prompt, user_message_content, task
+                    system_prompt, user_message_content, task,
+                    static_context=static_context
                 )
                 # Skip to JSON parsing (after the OpenAI try block)
             else:
@@ -1329,6 +1702,7 @@ EXECUTION HISTORY:
                 all_actions = []
                 is_complete = False
                 reasoning = ""
+                plan = ""
 
                 for line_num, line in enumerate(lines, 1):
                     line = line.strip()
@@ -1340,9 +1714,11 @@ EXECUTION HISTORY:
 
                         # Handle different types of JSON objects
                         if isinstance(obj, dict):
-                            # Extract reasoning from first object
+                            # Extract reasoning/plan from first object
                             if "reasoning" in obj and not reasoning:
                                 reasoning = obj["reasoning"]
+                            if "plan" in obj and not plan:
+                                plan = obj["plan"]
 
                             # Extract completion status
                             if "is_complete" in obj:
@@ -1380,6 +1756,7 @@ EXECUTION HISTORY:
                 # Construct unified response
                 result = {
                     "reasoning": reasoning or "JSONL response processed successfully",
+                    "plan": plan or "",
                     "is_complete": is_complete,
                     "actions": all_actions
                 }
@@ -1406,7 +1783,7 @@ EXECUTION HISTORY:
                     print(f"📋 DEBUG: END OF RESPONSE")
                     return ({
                         "reasoning": f"Failed to parse AI response: {response_text}",
-                        "action": {"tool": "request_clarification", "parameters": {"question": "Failed to parse response"}},
+                        "action": None,
                         "is_complete": False,
                         "error": f"JSON parsing error: {str(e)}"
                     }, response_text)
@@ -1414,7 +1791,7 @@ EXECUTION HISTORY:
         except Exception as e:
             return ({
                 "reasoning": f"Error calling reasoning engine: {str(e)}",
-                "action": {"tool_name": "request_clarification", "arguments": {"question": str(e)}},
+                "action": None,
                 "is_complete": False,
                 "error": str(e)
             }, str(e))
@@ -1425,21 +1802,13 @@ EXECUTION HISTORY:
         tool_name = action.get("tool") or action.get("tool_name")
         arguments = action.get("parameters") or action.get("arguments", {})
 
-        # Handle special tool requests
-        if tool_name == "request_clarification":
-            question = arguments.get('question', 'Additional details required') if isinstance(arguments, dict) else 'Additional details required'
-            return {
-                "success": False,
-                "tool": tool_name,
-                "result": f"Clarification needed: {question}",
-                "error": f"Clarification needed: {question}",
-                "needs_user_input": True,
-            }
-
-        # If filing an MCP issue, attach task_id by default
-        if tool_name == "report_mcp_issue":
-            if isinstance(arguments, dict) and "task_id" not in arguments and self.current_execution:
-                arguments = {**arguments, "task_id": self.current_execution.task_id}
+        # Fix: some models (OLMo) pass a list directly as arguments for edit_cells
+        # instead of {"filename": "...", "worksheet_name": "...", "cell_updates": [...]}
+        if isinstance(arguments, list):
+            if tool_name == "edit_cells":
+                arguments = {"cell_updates": arguments}
+            else:
+                arguments = {}
 
         # CRITICAL: Detect attempts to use Excel tools on PDF files (Fix #2)
         # Excel tools only work on .xlsx files, NOT .pdf files
@@ -1673,6 +2042,8 @@ EXECUTION HISTORY:
         else:
             # Starting a new task - clear created files tracking
             self.excel_client.clear_created_files()
+            self._iteration_summaries = []
+            self._context_excel_cache = {}
 
             if task_id is None:
                 task_id = f"task_{int(time.time())}"
@@ -1729,6 +2100,7 @@ EXECUTION HISTORY:
             # Iterative execution loop
             while task.total_iterations < task.max_iterations and task.status == TaskStatus.IN_PROGRESS:
                 task.total_iterations += 1
+                steps_before = len(task.steps)  # Track iteration boundary for summary
 
                 print(f"\n🤖 Iteration {task.total_iterations}/{task.max_iterations}")
 
@@ -1837,6 +2209,9 @@ EXECUTION HISTORY:
                     step_start = time.time()
                     try:
                         step.result = self._execute_action(action)
+                        # Normalize: some models (OLMo) cause MCP to return list instead of dict
+                        if not isinstance(step.result, dict):
+                            step.result = {"success": True, "result": step.result}
                         step.execution_time = time.time() - step_start
                     except ValueError as e:
                         # Tool doesn't exist - feed error back to AI for self-correction
@@ -1862,7 +2237,7 @@ EXECUTION HISTORY:
                         print(f"❌ Tool execution error: {step.error}")
 
                     # Check for errors
-                    if not step.result.get("success", True):
+                    if isinstance(step.result, dict) and not step.result.get("success", True):
                         step.error = step.result.get("error", "Unknown error")
                         print(f"❌ Error: {step.error}")
 
@@ -1891,7 +2266,7 @@ EXECUTION HISTORY:
                             break
                     else:
                         # Check if the result indicates a failed operation (common with MCP tools)
-                        result_str = str(step.result.get('result', 'No result'))
+                        result_str = str(step.result.get('result', 'No result')) if isinstance(step.result, dict) else str(step.result)
 
                         # Parse JSON result to check for success=false pattern
                         is_actual_failure = False
@@ -1922,7 +2297,7 @@ EXECUTION HISTORY:
                                 "action_number": action_idx + 1,
                                 "tool_name": step.tool_name,
                                 "success": True,
-                                "result": step.result.get("result", "")
+                                "result": step.result.get("result", "") if isinstance(step.result, dict) else step.result
                             })
 
                     # Persist after each step
@@ -1958,6 +2333,12 @@ EXECUTION HISTORY:
                     task.error = f"Agent stuck in loop: repeated '{step.tool_name}' {3} times without progress"
                     break
 
+                # Build iteration summary for context delivery
+                iteration_steps = task.steps[steps_before:]
+                if iteration_steps:
+                    summary = self._build_iteration_summary(task.total_iterations, iteration_steps)
+                    self._iteration_summaries.append(summary)
+
                 # Save iteration snapshot if enabled
                 if self.snapshot_iterations:
                     self._save_iteration_snapshot(task.total_iterations, task)
@@ -1975,7 +2356,7 @@ EXECUTION HISTORY:
 
             # Handle completion
             if task.status == TaskStatus.IN_PROGRESS and task.total_iterations >= task.max_iterations:
-                task.status = TaskStatus.FAILED
+                task.status = TaskStatus.COMPLETED
                 task.error = f"Max iterations ({task.max_iterations}) reached"
                 # Try to produce a concise summary of work done
                 try:
@@ -1984,7 +2365,7 @@ EXECUTION HISTORY:
                         task.final_result = summary
                 except Exception:
                     pass
-                print(f"⏰ Task stopped: reached maximum iterations")
+                print(f"⏰ Task stopped: reached maximum iterations (partial work saved)")
 
             task.end_time = time.time()
             self._persist_task(task)
@@ -2050,7 +2431,9 @@ EXECUTION HISTORY:
             task.status = TaskStatus.FAILED
             task.error = str(e)
             task.end_time = time.time()
+            import traceback
             print(f"💥 Task failed with exception: {str(e)}")
+            traceback.print_exc()
 
             # Add Langfuse scoring for failed task (v3 API)
             if self.langfuse_enabled and self._current_trace:
@@ -2150,7 +2533,7 @@ EXECUTION HISTORY:
                 summary += f"   Tool: {step.tool_name}\n"
                 if step.error:
                     summary += f"   Error: {step.error}\n"
-                elif step.result and step.result.get('success'):
+                elif step.result and isinstance(step.result, dict) and step.result.get('success'):
                     result_preview = str(step.result.get('result', ''))[:100]
                     summary += f"   Result: {result_preview}...\n"
                 summary += "\n"
@@ -2165,7 +2548,7 @@ def test_task_execution():
     from .mcp_client import ExcelMCPClient
 
     # Initialize clients
-    server_path = "excel_mcp_server/server.py"
+    server_path = "/root/excel_agent/excel_mcp_server/server.py"
     excel_client = ExcelMCPClient(server_path, "./test_excel_files")
 
     # You would need to provide your OpenAI API key here

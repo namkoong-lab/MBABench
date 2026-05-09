@@ -123,6 +123,7 @@ class AutoBatchRunner(BatchRunner):
         # Set versioned system prompt path for TaskExecutor
         config['system_prompt_path'] = str(SYSTEM_PROMPT_PATH)
 
+        config['_config_path'] = str(self.config_path)
         self.config = config
 
         print(f"✅ Configuration loaded: {config['batch_name']}")
@@ -177,6 +178,16 @@ class AutoBatchRunner(BatchRunner):
             if task_source:
                 query = query.filter(Task.task_source == task_source)
                 print(f"  Filter: task_source = {task_source}")
+
+            # Filter by task ID range (for splitting work across processes)
+            task_id_min = tf.get('task_id_min')
+            task_id_max = tf.get('task_id_max')
+            if task_id_min is not None:
+                query = query.filter(Task.id >= task_id_min)
+                print(f"  Filter: task_id >= {task_id_min}")
+            if task_id_max is not None:
+                query = query.filter(Task.id <= task_id_max)
+                print(f"  Filter: task_id <= {task_id_max}")
 
             all_tasks = query.all()
             print(f"  Found {len(all_tasks)} eligible tasks in DB")
@@ -314,6 +325,25 @@ class AutoBatchRunner(BatchRunner):
                 print(f"  ⬇️  Downloading: {filename}")
                 self.s3_client.download_file(bucket, key, str(local_path))
                 print(f"  ✅ Downloaded: {filename} ({local_path.stat().st_size:,} bytes)")
+
+                # Convert .xlsb (binary) to .xlsx — openpyxl/MCP tools only support .xlsx
+                if local_path.suffix.lower() == '.xlsb':
+                    xlsx_path = local_path.with_suffix('.xlsx')
+                    try:
+                        from pyxlsb import open_workbook as open_xlsb
+                        from openpyxl import Workbook as XlsxWorkbook
+                        out_wb = XlsxWorkbook()
+                        out_wb.remove(out_wb.active)
+                        with open_xlsb(str(local_path)) as xlsb_wb:
+                            for sheet_name in xlsb_wb.sheets:
+                                ws_out = out_wb.create_sheet(sheet_name)
+                                with xlsb_wb.get_sheet(sheet_name) as ws_in:
+                                    for row in ws_in.rows():
+                                        ws_out.append([cell.v for cell in row])
+                        out_wb.save(str(xlsx_path))
+                        print(f"  🔄 Converted {filename} -> {xlsx_path.name}")
+                    except Exception as conv_e:
+                        print(f"  ⚠️  Could not convert {filename}: {conv_e}")
             except Exception as e:
                 print(f"  ❌ Failed to download {filename}: {e}")
 
@@ -393,10 +423,16 @@ class AutoBatchRunner(BatchRunner):
         # Files to upload
         files_to_upload = []
 
-        # solution.xlsx
+        # Upload only solution.xlsx (the agent's work). Starting file copies are
+        # excluded to avoid judge ambiguity (judge takes xlsx_refs[0]).
+        # If no solution.xlsx exists (agent failed before creating it), fall back
+        # to uploading all xlsx so the attempt has some file record.
         solution_path = workspace / "solution.xlsx"
         if solution_path.exists():
             files_to_upload.append((solution_path, f"{s3_base}_solution.xlsx"))
+        else:
+            for xlsx_path in sorted(workspace.glob("*.xlsx")):
+                files_to_upload.append((xlsx_path, f"{s3_base}_{xlsx_path.name}"))
 
         # Find agent_logs directory and its contents
         agent_logs = workspace / "agent_logs"
@@ -416,6 +452,16 @@ class AutoBatchRunner(BatchRunner):
                     transcript = task_dir / "transcript.md"
                     if transcript.exists():
                         files_to_upload.append((transcript, f"{s3_base}_transcript.md"))
+
+            # thinking_trace.md (at agent_logs level, alongside openai_requests.csv)
+            thinking_trace = agent_logs / "thinking_trace.md"
+            if thinking_trace.exists():
+                files_to_upload.append((thinking_trace, f"{s3_base}_thinking_trace.md"))
+
+        # Batch config (so each attempt records exact run parameters)
+        config_path = self.config.get('_config_path')
+        if config_path and Path(config_path).exists():
+            files_to_upload.append((Path(config_path), f"{s3_base}_batch_config.yaml"))
 
         # Upload files to S3
         for local_path, s3_key in files_to_upload:
@@ -437,7 +483,8 @@ class AutoBatchRunner(BatchRunner):
 
         # Determine failure status
         agent_failed = workspace_result.status != "success"
-        agent_failed_reason = workspace_result.error_message if agent_failed else None
+        # Keep error_message even for success (e.g., "Max iterations reached" is useful metadata)
+        agent_failed_reason = workspace_result.error_message or None
 
         # Compute prompt_version from versioned file paths
         template_path = TASK_TEMPLATE_WSP_PATH if task_info.task_source == "wsp" else TASK_TEMPLATE_FMWC_PATH

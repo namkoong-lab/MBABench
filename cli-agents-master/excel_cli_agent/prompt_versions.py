@@ -15,8 +15,12 @@ PROMPT_VERSIONS = {
     "v8": {"system": "system_prompt_v8.txt", "fmwc": "task_template_fmwc_v4.txt", "wsp": "task_template_wsp_v1.txt"},
     "v9": {"system": "system_prompt_v9.txt", "fmwc": "task_template_fmwc_v4.txt", "wsp": "task_template_wsp_v1.txt"},
     "v10": {"system": "system_prompt_v10.txt", "fmwc": "task_template_fmwc_v4.txt", "wsp": "task_template_wsp_v1.txt"},
+    "v11": {"system": "system_prompt_v11.txt", "fmwc": "task_template_fmwc_v5.txt", "wsp": "task_template_wsp_v5.txt"},
+    # Cross combos for A/B testing
+    "v10sys-v5tpl": {"system": "system_prompt_v10.txt", "fmwc": "task_template_fmwc_v5.txt", "wsp": "task_template_wsp_v1.txt"},
+    "v11sys-v4tpl": {"system": "system_prompt_v11.txt", "fmwc": "task_template_fmwc_v4.txt", "wsp": "task_template_wsp_v1.txt"},
 }
-DEFAULT_PROMPT_VERSION = "v10"
+DEFAULT_PROMPT_VERSION = "v11"
 
 
 def parse_prompt_version(system_path: Path, template_path: Path) -> int:
