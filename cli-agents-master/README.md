@@ -50,13 +50,13 @@ apt-get update && apt-get install -y libreoffice-calc
 # 2. Install the package
 pip install .
 
-# 3. Set API keys in .env
+# 3. Set API key in .env
 cat > .env << 'EOF'
-OPENROUTER_API_KEY=sk-or-...
-ANTHROPIC_API_KEY=sk-ant-...       # Only for Claude Opus
-DATABASE_URL=postgresql://...       # Only for auto mode
-AWS_ACCESS_KEY_ID=...               # Only for auto mode
-AWS_SECRET_ACCESS_KEY=...           # Only for auto mode
+OPENROUTER_API_KEY=sk-or-...       # Required (6 of 7 models use OpenRouter)
+ANTHROPIC_API_KEY=sk-ant-...       # Optional (only for Claude Opus direct API)
+DATABASE_URL=postgresql://...       # Optional (only for auto mode with DB)
+AWS_ACCESS_KEY_ID=...               # Optional (only for auto mode with S3)
+AWS_SECRET_ACCESS_KEY=...           # Optional (only for auto mode with S3)
 EOF
 
 # 4. Run in local mode (no DB/S3 — just an API key)
