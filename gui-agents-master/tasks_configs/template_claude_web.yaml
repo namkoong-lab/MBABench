@@ -7,30 +7,50 @@
 
 template:
   agent_type: "claude_web"
-  prompt_version: 2
+  prompt_version: 9
 
   # Base directory for resolving relative paths in upload_files.
   # If omitted, paths are resolved from the current working directory.
   # local_files_base: "project_data/"
 
-  # Prompts — sent sequentially to the AI. Replace with your own instructions.
-  # These are generic placeholders — write prompts specific to YOUR task.
-  prompts:
-    - "Analyze the attached files. Summarize the key data and questions to answer."
-    - "Build an Excel solution on a new sheet. Use formulas (no hardcoded values) and organize the workbook clearly."
-    - "Create a summary sheet with your final answers and conclusions. Then download the workbook."
+  # Benchmark prompt: the recovered pv9 text, byte-identical to what
+  # claude_web and chatgpt_agent sent on the 206 in-scope tasks. Both
+  # providers now share it so results are directly comparable.
+  # See tasks_configs/prompts_pv9/README.md for provenance.
+  prompts_file: "tasks_configs/prompts_pv9/SHARED_pv9_prompt.txt"
 
   claude_web:
     # REQUIRED: paste the {project_id} from your Claude.ai project URL.
     # Example URL: https://claude.ai/project/abc123-... -> project_id is "abc123-..."
     # See README §5 for full instructions. Set to null to use the default chat
     # outside of any project.
-    project_id: "your-project-id-here"
+    project_id: "019f85bc-934b-73dd-b90d-79e48e2089ee"
+
+    # Surface mode: "chat" (legacy behavior) or "cowork". The toggle's
+    # selection persists across sessions, so the agent asserts it every
+    # task in both directions. Cowork runs are the 2026-07 benchmark target.
+    mode: cowork
+
+    # Cowork action approvals: manual | auto | skip. The UI default
+    # ("manual") pauses for EVERY action and stalls unattended runs.
+    # Ignored in chat mode.
+    cowork_approval: auto
 
     # Model selection (optional). If null or omitted, uses the currently
     # active model in your Claude.ai session.
-    # Options: opus_4_6, sonnet_4_6, haiku_4_5
-    model: null
+    # Options: fable_5, sonnet_5, haiku_4_5, opus_4_8, opus_4_7, opus_4_6,
+    #          opus_3, sonnet_4_6
+    model: fable_5
+
+    # Reasoning effort (optional). If null or omitted, keeps the session's
+    # current effort level (UI default is high).
+    # Options: low, medium, high, xhigh, max
+    effort: max
+
+    # Thinking switch (only exists for models with manual thinking control,
+    # e.g. the Opus family — a no-op for models like fable_5 where thinking
+    # is governed by the effort level).
+    enable_extended_thinking: true
 
     max_sec_per_task: 7200          # 2 hour timeout
 
@@ -49,6 +69,7 @@ template:
       type: "chrome"
       headless: false
       timeout: 30000
+      cdp_port: 9223              # must match Chrome --remote-debugging-port
 
     check_interval_seconds: 2
     max_wait_per_prompt_seconds: 7200  # 2 hours

@@ -61,6 +61,9 @@ MODEL_PRICING = {
     "anthropic/claude-opus-4.5": {"input": 5.00, "output": 25.00},
     "anthropic/claude-opus-4.6": {"input": 5.00, "output": 25.00},
     "claude-opus-4-6": {"input": 5.00, "output": 25.00},  # Anthropic direct model ID
+    "claude-opus-4-8": {"input": 5.00, "output": 25.00},  # Anthropic direct model ID
+    "claude-fable-5": {"input": 10.00, "output": 50.00},  # Anthropic direct model ID
+    "gpt-5.6-sol": {"input": 5.00, "output": 30.00},  # OpenAI direct model ID
     "google/gemini-3-pro-preview": {"input": 1.25, "output": 10.00},
     "z-ai/glm-4.7": {"input": 0.40, "output": 1.50},
     "x-ai/grok-4": {"input": 3.00, "output": 15.00},
@@ -89,6 +92,18 @@ MODEL_DEFAULTS: Dict[str, Dict] = {
         "thinking_budget_tokens": 50000,
         "max_completion_tokens": 64000,
     },
+    # claude-fable-5: thinking always on; effort (not budget_tokens) controls it.
+    # reasoning_effort maps to output_config.effort in the Anthropic direct path.
+    "claude-fable-5": {
+        "reasoning_effort": "max",
+        "max_completion_tokens": 64000,
+    },
+    # gpt-5.6-sol: xhigh is the highest reasoning_effort the API accepts
+    # (the ChatGPT UI "Ultra" label does not exist as an API value).
+    "gpt-5.6-sol": {
+        "reasoning_effort": "xhigh",
+        "max_completion_tokens": 64000,
+    },
     "google/gemini-3-pro-preview": {
         "reasoning_effort": "high",
         "max_completion_tokens": 64000,
@@ -112,6 +127,7 @@ MODEL_DEFAULTS: Dict[str, Dict] = {
 
 # Timeout by reasoning effort level
 TIMEOUT_BY_REASONING: Dict[Optional[str], int] = {
+    "max": 3600,  # Anthropic effort-based models (e.g. claude-fable-5)
     "xhigh": 300,
     "high": 240,
     None: 180,

@@ -49,7 +49,13 @@ def main():
     # Start LibreOffice engine (if available and not disabled)
     if not args.no_libreoffice and _LIBREOFFICE_AVAILABLE:
         try:
-            shared_state._lo_engine = LibreOfficeCalcEngine()
+            # Unique UNO port per server process: concurrent batches on one
+            # machine each spawn their own MCP server + soffice, and a shared
+            # port makes the second server's startup pkill kill the first
+            # server's soffice (observed 2026-07-23). UNO_PORT env overrides.
+            import os
+            uno_port = int(os.environ.get("UNO_PORT", 0)) or (2002 + (os.getpid() % 500))
+            shared_state._lo_engine = LibreOfficeCalcEngine(uno_port=uno_port)
             shared_state._lo_engine.start()
             print(f"LibreOffice Calc engine started (UNO port: {shared_state._lo_engine.uno_port})", file=sys.stderr)
         except Exception as e:

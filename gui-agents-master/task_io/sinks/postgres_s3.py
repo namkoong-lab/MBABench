@@ -199,14 +199,40 @@ class PostgresS3AttemptSink:
             )
             for c in schema.columns
         ]
-        conn = self._connect()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(stmt, params)
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+        # Neon (serverless PG) drops idle connections server-side during long
+        # GUI tasks; the stale socket still reads as open client-side, so the
+        # next execute dies with OperationalError ("SSL connection has been
+        # closed unexpectedly") and even rollback() then raises. Losing that
+        # insert loses the whole attempt (files are already in S3) AND kills
+        # the run mid-pass (observed 3x on 2026-07-24). Reconnect and retry
+        # once on stale-connection errors; the INSERT is not committed on the
+        # dead connection, so the retry cannot double-insert.
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            conn = self._connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(stmt, params)
+                conn.commit()
+                return
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                last_exc = e
+                logger.warning(
+                    f"Sink: DB connection stale ({e.__class__.__name__}: {e}); "
+                    f"{'reconnecting and retrying' if attempt == 0 else 'giving up'}"
+                )
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+        raise last_exc
 
     # --- public API --------------------------------------------------------
 

@@ -225,7 +225,7 @@ No database, no S3, no cloud credentials needed. Just an API key and local folde
                 Filter by task_source, trial count, deprecated
                     │
 3. S3 DOWNLOAD  Download starting files (PDFs, xlsx) to workspace
-                s3://biz-bench/BizbenchV1/...
+                s3://mbabench/BizbenchV1/...
                     │
 4. EXECUTE      TaskExecutor runs AI reasoning loop:
                   a. Build system prompt + task template
@@ -335,7 +335,7 @@ task_attempts (WRITE)
 ### S3 Structure
 
 ```
-s3://biz-bench/BizbenchV1/
+s3://mbabench/BizbenchV1/
 ├── prompts/{model}_openpyxl/
 │   ├── {timestamp}_system_prompt_v{N}.txt
 │   ├── {timestamp}_task_template_fmwc_v{N}.txt

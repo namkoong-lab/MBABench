@@ -25,7 +25,8 @@ template:
     - "Add a chart on a new sheet called 'Visualization'."
 
   claude_web:
-    model: opus_4_6            # See model options table below
+    model: fable_5             # See model options table below
+    effort: max
 ```
 
 You can have 1 prompt or 20. Compare this to the default prompts that ship with the repo — those are multi-paragraph financial-modeling instructions with rubric criteria. Your prompts can be completely different.
@@ -44,8 +45,10 @@ You can have 1 prompt or 20. Compare this to the default prompts that ship with 
 
 | Branch | Agent | Config key | Options |
 |--------|-------|-----------|---------|
-| GUI | Claude | `claude_web.model` | `opus_4_6`, `sonnet_4_6`, `haiku_4_5` |
-| GUI | ChatGPT | `chatgpt_web.model` | `instant`, `thinking`, `pro` |
+| GUI | Claude | `claude_web.model` | `fable_5`, `sonnet_5`, `opus_4_8`, `opus_4_7`, `opus_4_6`, `opus_3`, `sonnet_4_6`, `haiku_4_5` |
+| GUI | Claude | `claude_web.effort` | `low`, `medium`, `high`, `xhigh`, `max` |
+| GUI | ChatGPT | `chatgpt_web.model` | `gpt_5_6_sol`, `gpt_5_5`, `gpt_5_4`, `gpt_5_3`, `o3` |
+| GUI | ChatGPT | `chatgpt_web.intelligence` | `instant`, `medium`, `high`, `xhigh`, `pro` |
 | Excel | Claude | `claude_excel_agent.model` | `opus_4_6`, `sonnet_4_6` |
 | Excel | ChatGPT | `chatgpt_excel_agent.model` | `fast`, `standard`, `heavy` |
 

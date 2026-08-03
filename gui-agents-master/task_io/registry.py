@@ -190,7 +190,7 @@ def build_sink(cfg: SimpleNamespace) -> AttemptSink:
         session_token = _resolve_from_value_or_env(
             aws_cfg, "session_token", "session_token_env"
         )
-        s3_bucket = getattr(aws_cfg, "s3_bucket", None) or "biz-bench"
+        s3_bucket = getattr(aws_cfg, "s3_bucket", None) or "mbabench"
         s3_prefix = getattr(aws_cfg, "s3_prefix", None) or "BizbenchV1/attempts"
         identity = resolve_agent_identity(cfg)
         return BizbenchPostgresS3AttemptSink(

@@ -13,26 +13,34 @@ template:
   upload_to_cloud: false
 
   chatgpt_web:
-    project_id: "your-project-id-here"
-    project_slug: "your-project-slug"
+    project_id: "6a5fad57b1f88191805ca675dfaa6ba4"
+    project_slug: null   # new ChatGPT project URLs have no slug
 
-    agent_mode: true
-    model: null
+    # Agent mode no longer exists in the ChatGPT UI — must stay false.
+    agent_mode: false
+    # Benchmark target: Work mode, GPT-5.6 Sol at Ultra effort,
+    # Standard speed.
+    mode: work
+    model: gpt_5_6_sol
+    effort: ultra
+    speed: standard
+    intelligence: null
 
-    max_sec_per_task: 600
+    max_sec_per_task: 1200
 
     browser:
       type: "chrome"
       headless: false
       timeout: 30000
+      cdp_port: 9226              # must match Chrome --remote-debugging-port
 
     check_interval_seconds: 3
-    max_wait_per_prompt_seconds: 300
+    max_wait_per_prompt_seconds: 900   # Pro reasons for minutes, even on trivial prompts
 
     retry:
       max_agent_attempts: 1
       max_total_attempts: 2
-      max_sec_per_attempt: 600
+      max_sec_per_attempt: 1200
       sleep_between_retries: 5
 
     output:

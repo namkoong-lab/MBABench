@@ -29,30 +29,71 @@ class UnknownAgentCombination(ValueError):
     pass
 
 
-# Signature: (claude_web.model,). Extend the tuple — and every entry — when
-# adding another Claude field that should bifurcate the DB label (e.g.
-# enable_extended_thinking, once it's promoted into the schema).
+# Signature: (claude_web.mode, claude_web.model, claude_web.effort). The
+# claude.ai UI (2026-07) exposes reasoning effort AND a Chat/Cowork mode
+# toggle as first-class controls that change agent output, so both
+# bifurcate the DB label. mode defaults to "chat"; effort=None entries are
+# the pre-effort-era runs, kept for DB continuity.
 _CLAUDE_IDENTITIES: dict[tuple, AgentIdentity] = {
-    ("sonnet_4_6",): AgentIdentity("claude_web", "claude_web"),
-    ("opus_4_6",): AgentIdentity("claude_opus_4_6", "claude_opus_4_6"),
-    ("haiku_4_5",): AgentIdentity("claude_haiku_4_5", "claude_haiku_4_5"),
+    ("chat", "sonnet_4_6", None): AgentIdentity("claude_web", "claude_web"),
+    ("chat", "opus_4_6", None): AgentIdentity(
+        "claude_opus_4_6", "claude_opus_4_6"
+    ),
+    ("chat", "haiku_4_5", None): AgentIdentity(
+        "claude_haiku_4_5", "claude_haiku_4_5"
+    ),
+    # 2026-07 benchmark refresh (names collision-checked against
+    # mbabench/attempts/, mbabench/BizbenchV1/attempts/, and DB
+    # agent_model_name on 2026-07-21; signed off 2026-07-21):
+    ("chat", "fable_5", "max"): AgentIdentity(
+        "claude_web_chat_fable5_max", "claude_web_chat_fable5_max"
+    ),
+    ("cowork", "fable_5", "max"): AgentIdentity(
+        "claude_web_cowork_fable5_max", "claude_web_cowork_fable5_max"
+    ),
+    # 2026-07-24 grading-variance experiment (chat-mode Opus 4.8 at max
+    # effort; collision-checked against DB agent_model_name + S3 prefixes;
+    # _var suffix keeps it separate from any future production Opus 4.8 wave):
+    ("chat", "opus_4_8", "max"): AgentIdentity(
+        "claude_web_chat_opus4.8_max_var", "claude_web_chat_opus4.8_max_var"
+    ),
 }
 
 
-# When agent_mode=True, ChatGPT Agent is its own routed backend — the
-# `model` dropdown becomes cosmetic, so agent-mode runs always collapse to
-# one identity regardless of chatgpt_web.model. Only non-agent runs
-# bifurcate by model.
-_CHATGPT_AGENT_IDENTITY = AgentIdentity("chatgpt_agent", "chatgpt_agent")
+# Agent mode no longer exists in the ChatGPT UI (removed ~mid-2026).
+# agent_mode=True is refused at identity-resolution time rather than
+# silently collapsed to the historical chatgpt_agent label — the historical
+# label described a different backend that can no longer be invoked.
 
-# Signature for non-agent-mode runs: (chatgpt_web.model,). model=None means
-# "let the session default win"; that + agent_mode=False is the legacy
-# `chatgpt_web` label, kept for DB continuity with pre-refactor rows.
-_CHATGPT_NON_AGENT_IDENTITIES: dict[tuple, AgentIdentity] = {
-    (None,): AgentIdentity("chatgpt_web", "chatgpt_web"),
-    ("instant",): AgentIdentity("chatgpt_instant", "chatgpt_instant"),
-    ("thinking",): AgentIdentity("chatgpt_thinking", "chatgpt_thinking"),
-    ("pro",): AgentIdentity("chatgpt_web_pro", "chatgpt_web_pro"),
+# Signatures (mode defaults to "chat"):
+#   chat: ("chat", chatgpt_web.model, chatgpt_web.intelligence)
+#   work: ("work", chatgpt_web.model, chatgpt_web.effort, chatgpt_web.speed)
+# The chat picker is model (submenu) + intelligence (radios); the work
+# picker is model + effort + speed under the pill's Advanced section.
+# intelligence=None entries are the one-axis-era runs (model carried the
+# legacy instant/thinking/pro values), kept for DB continuity.
+_CHATGPT_IDENTITIES: dict[tuple, AgentIdentity] = {
+    ("chat", None, None): AgentIdentity("chatgpt_web", "chatgpt_web"),
+    ("chat", "instant", None): AgentIdentity(
+        "chatgpt_instant", "chatgpt_instant"
+    ),
+    ("chat", "thinking", None): AgentIdentity(
+        "chatgpt_thinking", "chatgpt_thinking"
+    ),
+    ("chat", "pro", None): AgentIdentity("chatgpt_web_pro", "chatgpt_web_pro"),
+    # 2026-07 benchmark refresh (collision-checked + signed off 2026-07-21):
+    ("chat", "gpt_5_6_sol", "pro"): AgentIdentity(
+        "chatgpt_web_chat_gpt5.6_sol_pro", "chatgpt_web_chat_gpt5.6_sol_pro"
+    ),
+    ("work", "gpt_5_6_sol", "ultra", "standard"): AgentIdentity(
+        "chatgpt_web_work_gpt5.6_sol_ultra", "chatgpt_web_work_gpt5.6_sol_ultra"
+    ),
+    # 2026-07-24 grading-variance experiment (chat-mode GPT-5.5 at Pro
+    # intelligence; collision-checked against DB agent_model_name + S3
+    # prefixes; _var suffix separates it from any future production wave):
+    ("chat", "gpt_5_5", "pro"): AgentIdentity(
+        "chatgpt_web_chat_gpt5.5_pro_var", "chatgpt_web_chat_gpt5.5_pro_var"
+    ),
 }
 
 
@@ -74,14 +115,16 @@ def _resolve_claude(cfg: SimpleNamespace) -> AgentIdentity:
         raise UnknownAgentCombination(
             "provider=claude but cfg.claude_web block is missing."
         )
+    mode = (getattr(block, "mode", None) or "chat").lower()
     model = getattr(block, "model", None)
-    key = (model,)
+    effort = getattr(block, "effort", None)
+    key = (mode, model, effort)
     try:
         return _CLAUDE_IDENTITIES[key]
     except KeyError:
         raise UnknownAgentCombination(
-            f"No Claude identity for claude_web.model={model!r}. "
-            f"Known: {list(_CLAUDE_IDENTITIES)}. "
+            f"No Claude identity for (claude_web.mode, claude_web.model, "
+            f"claude_web.effort)={key!r}. Known: {list(_CLAUDE_IDENTITIES)}. "
             f"Add an entry in infra/configs/agent_identity.py "
             f"if this is a real combination."
         )
@@ -93,19 +136,31 @@ def _resolve_chatgpt(cfg: SimpleNamespace) -> AgentIdentity:
         raise UnknownAgentCombination(
             "provider=chatgpt but cfg.chatgpt_web block is missing."
         )
-    agent_mode = bool(getattr(block, "agent_mode", True))
-    if agent_mode:
-        # ChatGPT Agent is its own backend; chatgpt_web.model is cosmetic.
-        return _CHATGPT_AGENT_IDENTITY
+    if bool(getattr(block, "agent_mode", False)):
+        raise UnknownAgentCombination(
+            "chatgpt_web.agent_mode=true, but Agent mode no longer exists "
+            "in the ChatGPT UI (removed ~mid-2026) — the run would silently "
+            "execute as a non-agent chat under the wrong DB label. Set "
+            "agent_mode: false and pick chatgpt_web.model + "
+            "chatgpt_web.intelligence instead."
+        )
+    mode = (getattr(block, "mode", None) or "chat").lower()
     model = getattr(block, "model", None)
-    key = (model,)
+    if mode == "work":
+        effort = getattr(block, "effort", None)
+        speed = getattr(block, "speed", None) or "standard"
+        key = (mode, model, effort, speed)
+        axes = "(mode, model, effort, speed)"
+    else:
+        intelligence = getattr(block, "intelligence", None)
+        key = (mode, model, intelligence)
+        axes = "(mode, model, intelligence)"
     try:
-        return _CHATGPT_NON_AGENT_IDENTITIES[key]
+        return _CHATGPT_IDENTITIES[key]
     except KeyError:
         raise UnknownAgentCombination(
-            f"No ChatGPT identity for "
-            f"(chatgpt_web.model, agent_mode=False)={key!r}. "
-            f"Known (non-agent): {list(_CHATGPT_NON_AGENT_IDENTITIES)}. "
+            f"No ChatGPT identity for chatgpt_web {axes}={key!r}. "
+            f"Known: {list(_CHATGPT_IDENTITIES)}. "
             f"Add an entry in infra/configs/agent_identity.py "
             f"if this is a real combination."
         )

@@ -1,6 +1,6 @@
 # Web Agent Automation
 
-Automated batch execution of AI agents that work *inside the web chat UIs* of Claude.ai and ChatGPT (Agent mode and Extended Pro). The system connects to a real Chrome browser via the Chrome DevTools Protocol, navigates to the chat, uploads task files, sends one or more prompts, and downloads any Excel artifacts the model produces.
+Automated batch execution of AI agents that work *inside the web chat UIs* of Claude.ai and ChatGPT. The system connects to a real Chrome browser via the Chrome DevTools Protocol, navigates to the chat, uploads task files, sends one or more prompts, and downloads any Excel artifacts the model produces.
 
 > **Looking at the BizbenchV1 repo as a whole?** See [`../AGENTS.md`](../AGENTS.md) for an orientation across all agent suites in this repo.
 
@@ -41,7 +41,7 @@ If you're outside the BizbenchV1 team and want to scale across multiple boxes, t
 - **Regular Google Chrome** (Chrome Canary v148+ has a CDP compatibility issue with Playwright — stick with the stable channel)
 - **Playwright Chromium browser** binaries (installed below via `playwright install chromium`)
 - **Web GUI login** to your provider — this system uses your existing Claude.ai or ChatGPT browser session, **not** API keys. There's nothing to configure with `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
-- For ChatGPT runs: a paid **ChatGPT Plus or Pro subscription** is required (Agent mode and Extended Pro are paid features).
+- For ChatGPT runs: a paid **ChatGPT Plus or Pro subscription** is required (Pro intelligence is a paid feature).
 
 ---
 
@@ -129,9 +129,7 @@ Both providers identify a "project" or "workspace" you want each task to start i
 3. Open the project. The URL looks like `https://chatgpt.com/g/g-p-{project_id}-{slug}/project` — copy both the hex `{project_id}` (after `g-p-`) and the URL `{slug}`.
 4. Paste them into `tasks_configs/template_chatgpt_web.yaml` under `chatgpt_web.project_id` and `chatgpt_web.project_slug`.
 
-**ChatGPT Extended Pro:** in the project settings, set the default model to "Extended Pro" (or "Pro"). Every new chat in the project will then use Extended Pro without further toggling.
-
-**ChatGPT Agent mode:** the runner enables Agent mode automatically via the `+` menu before sending the first prompt. No project-level setting needed.
+**ChatGPT model/intelligence:** the runner selects `chatgpt_web.model` and `chatgpt_web.intelligence` via the composer pill before sending the first prompt. (Agent mode no longer exists in the ChatGPT UI.)
 
 ### 4. Write a task list
 
@@ -157,15 +155,9 @@ tasks:
 .venv/bin/python claude_web_batch_runner.py \
   --tasks tasks_configs/examples/sample_tasks.yaml
 
-# ChatGPT — Agent mode (uses Code Interpreter to build Excel)
+# ChatGPT (model + intelligence set in the template)
 .venv/bin/python claude_web_batch_runner.py \
   --tasks tasks_configs/examples/sample_tasks.yaml \
-  --provider chatgpt
-
-# ChatGPT — Extended Pro (extended thinking, no Code Interpreter)
-.venv/bin/python claude_web_batch_runner.py \
-  --tasks tasks_configs/examples/sample_tasks.yaml \
-  --template tasks_configs/template_chatgpt_web.yaml \
   --provider chatgpt
 
 # Dry-run — preview tasks without executing
@@ -251,7 +243,8 @@ template:
   download_artifacts: true               # Download Excel files from chat
 
   claude_web:
-    model: opus_4_6                      # opus_4_6 | sonnet_4_6 | haiku_4_5 | null
+    model: fable_5                       # fable_5 | sonnet_5 | opus_4_8 | ... | null
+    effort: max                          # low | medium | high | xhigh | max | null
     project_id: "your-project-id-here"
 
     max_sec_per_task: 7200               # 120 min total timeout
@@ -277,49 +270,64 @@ template:
       log_directory: "claude_web_logs"
 ```
 
+### Surface mode: Chat vs Cowork / Work
+
+Both providers now ship a mode toggle on the home/project surface — **Chat | Cowork** on Claude, **Chat | Work** on ChatGPT. The toggle's selection **persists across sessions**, so the agent asserts it at the start of every task, in both directions (a leftover selection would silently change what a run benchmarks).
+
+- `claude_web.mode: chat | cowork` (default `chat`). Cowork adds an action-approval dropdown; `claude_web.cowork_approval: manual | auto | skip` (default `auto` — the UI default `manual` pauses on every action and stalls unattended runs). The model/effort dropdown is identical in both modes.
+- `chatgpt_web.mode: chat | work` (default `chat`). Work mode replaces the intelligence picker with an **Advanced** panel: `model` (`gpt_5_6_sol`, `gpt_5_6_terra`, `gpt_5_6_luna`, `gpt_5_5`), `effort` (`light|medium|high|xhigh|max|ultra`), and `speed` (`standard|fast`, default `standard`). The chat-mode `intelligence` key must be null in work mode. Verification uses the pill text and Advanced rows — never the power slider, which decouples once an off-slider effort (Ultra) is chosen.
+
+The 2026-07 benchmark runs use **Cowork / Work**: Claude = `mode: cowork` + `fable_5` @ `max` (identity `claude_web_cowork_fable5_max`); ChatGPT = `mode: work` + `gpt_5_6_sol` @ `ultra`/`standard` (identity `chatgpt_web_work_gpt5.6_sol_ultra`).
+
 ### Model selection
 
-Both providers support configurable model selection via the provider's UI dropdown. If omitted or `null`, the runner uses whatever model is currently active in your session.
+Both providers expose **two axes**: the model and a reasoning-effort level. If a value is omitted or `null`, the runner keeps whatever is currently active in your session. Selection is verified after clicking; a mismatch fails the attempt loudly rather than silently benchmarking the wrong model.
 
-**Claude:**
+**Claude** (`claude_web.model` + `claude_web.effort`):
 
-| Config value | Claude.ai model |
-|---|---|
-| `opus_4_6` | Opus 4.6 |
-| `sonnet_4_6` | Sonnet 4.6 |
-| `haiku_4_5` | Haiku 4.5 |
-| `null` / omitted | Current session default |
+| `model` | Claude.ai model | | `effort` | UI label |
+|---|---|---|---|---|
+| `fable_5` | Fable 5 | | `low` | Low |
+| `sonnet_5` | Sonnet 5 | | `medium` | Medium |
+| `opus_4_8` | Opus 4.8 | | `high` | High (UI default) |
+| `opus_4_7` / `opus_4_6` / `opus_3` | Opus 4.7 / 4.6 / 3 | | `xhigh` | Extra |
+| `sonnet_4_6` / `haiku_4_5` | Sonnet 4.6 / Haiku 4.5 | | `max` | Max |
 
-**ChatGPT:**
+`enable_extended_thinking` still applies to models with a manual Thinking switch (Opus family — the switch now lives inside the Effort submenu). Models like Fable 5 have no switch; the setting is a harmless no-op there.
 
-| Config value | ChatGPT model |
-|---|---|
-| `instant` | Instant 5.3 (everyday chats) |
-| `thinking` | Thinking 5.4 (complex questions) |
-| `pro` | Pro 5.4 (research-grade) |
-| `null` / omitted | Current session default |
+**ChatGPT** (`chatgpt_web.model` + `chatgpt_web.intelligence`):
 
-If the specified model is not available in your account, the runner falls back to the current default.
+| `model` | ChatGPT model | | `intelligence` | UI label |
+|---|---|---|---|---|
+| `gpt_5_6_sol` | GPT-5.6 Sol | | `instant` | Instant |
+| `gpt_5_5` | GPT-5.5 | | `medium` | Medium |
+| `gpt_5_4` | GPT-5.4 | | `high` | High |
+| `gpt_5_3` | GPT-5.3 | | `xhigh` | Extra High |
+| `o3` | o3 | | `pro` | Pro |
+
+Legacy one-axis values (`model: instant|thinking|pro`) are auto-routed to the intelligence axis with a warning.
+
+> **Agent mode is gone.** ChatGPT removed Agent mode from the UI (~mid-2026). The `agent_mode` key is still parsed for backward compatibility but ignored by the agent (with a warning); the infra track's identity resolution refuses `agent_mode: true` outright so mislabeled rows can't reach the DB.
 
 ### "Continue" auto-retry
 
 If the model finishes responding but no Excel file appears, the engine can automatically send a "Continue" message asking the model to complete the task and provide the Excel file.
 
-- **ChatGPT Agent mode**: up to 5 continues.
-- **ChatGPT Extended Pro**: no continues — Extended Pro finishes end-to-end in one response.
+- **ChatGPT**: up to 5 continues.
 - **Claude**: up to 5 continues.
+- If download buttons are visible but retrieval fails, the engine does NOT send "Continue" — that's a retrieval failure, not an incomplete model.
 
 ### Provider comparison
 
-|  | Claude | ChatGPT Agent Mode | ChatGPT Extended Pro |
-|---|---|---|---|
-| Flag | `--provider claude` (default) | `--provider chatgpt` | `--provider chatgpt` |
-| Template setting | `agent_type: claude_web` | `agent_mode: true` | `agent_mode: false` |
-| Model selection | `model: opus_4_6` (configurable) | Set in ChatGPT project | Set in ChatGPT project |
-| How it works | Extended thinking | Code Interpreter builds Excel | Extended thinking builds Excel |
-| Typical task time | 5-15 min | 15-30 min | 15-45 min |
-| Log directory | `claude_web_logs/` | `chatgpt_web_logs/` | `chatgpt_web_logs/` |
-| Output prefix | `claudeGUI` | `chatgptGUI_agent` | `chatgptGUI_extended` |
+|  | Claude | ChatGPT |
+|---|---|---|
+| Flag | `--provider claude` (default) | `--provider chatgpt` |
+| Template setting | `agent_type: claude_web` | `agent_type: chatgpt_web` |
+| Model selection | `model: fable_5` + `effort: max` | `model: gpt_5_6_sol` + `intelligence: pro` |
+| How it works | Reasoning at the chosen effort builds Excel artifacts | Reasoning at the chosen intelligence builds Excel (retrieved via backend API or file cards) |
+| Typical task time | 5-30 min | 15-45 min |
+| Log directory | `claude_web_logs/` | `chatgpt_web_logs/` |
+| Output prefix | `claudeGUI` | `chatgptGUI` |
 
 ---
 
@@ -418,9 +426,9 @@ ps aux | grep remote-debugging-port  # all debugging Chrome instances
 
 **`Protocol error (Browser.setDownloadBehavior): Browser context management is not supported`.** Chrome Canary v148+ incompatibility — switch to regular Chrome.
 
-**`Agent mode menu not found` (ChatGPT).** ChatGPT's UI changes frequently. The runner activates Agent mode by clicking the `+` menu (`[data-testid="composer-plus-btn"]`) and selecting "Agent mode". If selectors break, update `claude_web_agent/chatgpt_web_agent.py`.
+**`chatgpt_web.agent_mode is set but Agent mode no longer exists` (ChatGPT).** Agent mode was removed from the ChatGPT UI (~mid-2026). Set `agent_mode: false` and use `chatgpt_web.model` + `chatgpt_web.intelligence` instead.
 
-**`0 artifact preview cards found` (ChatGPT).** The model responded with text only and didn't produce an Excel file. Usually means Agent mode didn't engage or the prompt didn't trigger file creation. Check the conversation in the browser.
+**`0 artifact preview cards found` (ChatGPT).** The model responded with text only and didn't produce an Excel file (and the backend-API download found no sandbox .xlsx refs). Usually means the prompt didn't trigger file creation. Check the conversation in the browser.
 
 **`You don't have access to this project` (ChatGPT).** The `project_id` in the template doesn't match the ChatGPT account logged into that browser. Each ChatGPT account has its own project IDs — update the template with the correct ID from your account's project URL.
 

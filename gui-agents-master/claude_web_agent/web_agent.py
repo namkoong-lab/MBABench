@@ -77,6 +77,12 @@ class WebAgent(ABC):
         self.messages: list[ConversationMessage] = []
         self.current_response_count = 0
 
+        # Set by download_all_artifacts(): whether download controls were
+        # visible on the page at all. Lets the caller distinguish "the model
+        # produced nothing" (a Continue prompt is legitimate) from "a file
+        # exists but retrieval failed" (re-prompting spams a finished model).
+        self.last_download_saw_buttons = False
+
     @abstractmethod
     async def navigate_to_new_chat(self) -> bool:
         """

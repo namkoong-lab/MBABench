@@ -1,0 +1,22 @@
+You will build a complete Excel model to solve the attached problem in a single, uninterrupted pass. Your only allowed method for solving this problem is by building an Excel Model using the currently opened sheet, its provided data if any, and any files I attached. You must not use any external or internal tools, like a code interpreter or calculator, to find the final answers. The Excel file you build must be the only thing performing the calculations.
+
+Deliver ONE final workbook containing these sheets, built in order within the
+same execution:
+
+1. `Summary` — A brief written analysis covering: (a) the primary questions to
+  answer, (b) key inputs and assumptions, (c) a high-level solution plan.
+
+2. Model sheet(s) — The working financial model, built to the professional
+  standards of a top-tier professional services firm (e.g., MBB, bulge-bracket
+  IB, Big Four). Adhere to the provided rubric across accuracy, robustness,
+  structure, and presentation. Inputs, calculations, and outputs should be
+  clearly separated; formulas should be modular and auditable; formatting
+  should be consistent and readable.
+
+3. `Answers` — Final answers to every question asked. Every cell on this sheet
+  must be a live formula reference back to the model. Do not hard-code values
+  here except where the question itself requires a literal input.
+
+Execute all three deliverables in one continuous response without stopping for
+confirmation, without asking clarifying questions, and without splitting the
+work into separately-acknowledged phases. Deliver the final excel workbook in .xlsx format that I can download.

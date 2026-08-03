@@ -1,3 +1,10 @@
+# ============================================================================
+# DEPRECATED (2026-07): Agent mode no longer exists in the ChatGPT UI.
+# Runs from this template are refused at preflight/identity-resolution time
+# (agent_mode=true). Kept for historical reference only — use
+# chatgpt_pro.yaml (legacy) or a two-axis config
+# (model: gpt_5_6_sol + intelligence: pro) instead.
+# ============================================================================
 # Spin-up config template: ChatGPT provider, agent mode.
 #
 # Pass to spinup.sh via:

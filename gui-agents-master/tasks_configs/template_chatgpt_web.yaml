@@ -12,10 +12,12 @@ template:
   # If omitted, paths are resolved from the current working directory.
   # local_files_base: "project_data/"
 
-  # Single prompt — all instructions in one message (ChatGPT agent mode works best this way).
-  # Replace with your own instructions. These are generic placeholders.
-  prompts:
-    - "Analyze the attached files. Summarize the key data, build an Excel solution with formulas (no hardcoded values), and create a summary sheet with your final answers. Download the workbook when done."
+  # Benchmark prompt: the recovered pv9 text, byte-identical to what
+  # claude_web and chatgpt_agent sent on the 206 in-scope tasks. Both
+  # providers now share it so results are directly comparable.
+  # See tasks_configs/prompts_pv9/README.md for provenance.
+  prompts_file: "tasks_configs/prompts_pv9/SHARED_pv9_prompt.txt"
+  prompt_version: 9
 
   # Where the downloaded .xlsx artifact is saved (relative to CWD).
   download_artifacts: true
@@ -26,16 +28,34 @@ template:
     # REQUIRED: paste from your ChatGPT project URL.
     # Example URL: https://chatgpt.com/g/g-p-{project_id}-{slug}/project
     # See README §5 for full instructions. Both fields are required.
-    project_id: "your-project-id-here"
-    project_slug: "your-project-slug"
+    project_id: "6a5fad57b1f88191805ca675dfaa6ba4"
+    project_slug: null   # new ChatGPT project URLs have no slug
 
-    # Enable agent mode (uses Code Interpreter for Excel)
-    agent_mode: true
+    # DEPRECATED: Agent mode no longer exists in the ChatGPT UI (removed
+    # ~mid-2026). The key is accepted but ignored (warning at runtime).
+    agent_mode: false
 
     # Model selection (optional). If null or omitted, uses the current
     # model in your ChatGPT session.
-    # Options: instant, thinking, pro
-    model: null
+    # Options: gpt_5_6_sol, gpt_5_5, gpt_5_4, gpt_5_3, o3
+    # (Legacy one-axis values instant/thinking/pro are auto-routed to the
+    #  intelligence axis with a warning.)
+    model: gpt_5_6_sol
+
+    # Surface mode: "chat" (legacy behavior) or "work". The toggle's
+    # selection persists across sessions, so the agent asserts it every
+    # task in both directions. Work runs are the 2026-07 benchmark target.
+    mode: work
+
+    # WORK-mode picker (pill menu > Advanced). Work-mode models:
+    # gpt_5_6_sol, gpt_5_6_terra, gpt_5_6_luna, gpt_5_5.
+    # Effort: light, medium, high, xhigh, max, ultra. Speed: standard, fast.
+    effort: ultra
+    speed: standard
+
+    # CHAT-mode intelligence axis (instant, medium, high, xhigh, pro).
+    # Must be null when mode: work.
+    intelligence: null
 
     max_sec_per_task: 5400  # 90 min timeout
 
@@ -43,6 +63,7 @@ template:
       type: "chrome"
       headless: false
       timeout: 30000
+      cdp_port: 9226              # must match Chrome --remote-debugging-port
 
     check_interval_seconds: 3
     max_wait_per_prompt_seconds: 5400  # 90 min — single prompt does all 3 steps

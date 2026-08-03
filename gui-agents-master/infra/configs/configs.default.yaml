@@ -40,7 +40,7 @@ provider:
 # independent of any behavior field.
 agent:
   prompt_version:
-    value: 8                 # matches DEFAULT_MODELS_PROMPT_VERSION["claude_web"]
+    value: 9                 # matches DEFAULT_MODELS_PROMPT_VERSION["claude_web"]
     required: false
 
 
@@ -154,7 +154,7 @@ aws:
     value: "AWS_SESSION_TOKEN"
     required: false
   s3_bucket:
-    value: "biz-bench"
+    value: "mbabench"
     required: false
   s3_prefix:
     value: "BizbenchV1/attempts"   # final key = {prefix}/{agent_folder}/task_source={src}/task_id={id}/...
@@ -194,14 +194,20 @@ poll:
 # Prompts sent sequentially to the AI. Claude-friendly default; for ChatGPT
 # override with a single combined prompt in configs.yaml or per-task.
 prompts:
-  value:
-    - "Analyze the attached files. Summarize the key data and questions to answer."
-    # - "Build an Excel solution on a new sheet. Use formulas (no hardcoded values) and organize the workbook clearly."
-    # - "Create a summary sheet with your final answers and conclusions. Then download the workbook."
-  required: true
+  value: []                    # unused when prompts_file is set (below)
+  required: false
+
+# Single source of truth for the long benchmark prompt. The engine expands
+# this into `prompts`. Recovered pv9 text — byte-identical to what
+# claude_web and chatgpt_agent sent on the 206 in-scope tasks; shared by
+# both providers so results are directly comparable.
+# Provenance: tasks_configs/prompts_pv9/README.md
+prompts_file:
+  value: "tasks_configs/prompts_pv9/SHARED_pv9_prompt.txt"
+  required: false
 
 prompt_version:
-  value: 8                     # engine config's prompt_version (top-level)
+  value: 9                     # engine config's prompt_version (top-level)
   required: false
 
 # Empty = let the engine resolve paths from CWD. Set to the directory
@@ -218,9 +224,27 @@ claude_web:
   project_id:
     value: null
     required: false
-  # null crashes the agent at model-selector time — DO NOT leave null.
+  # Surface mode: "chat" | "cowork". Selection persists across sessions;
+  # the agent asserts it every task. Bifurcates the DB identity.
+  mode:
+    value: "cowork"
+    required: false
+  # Cowork action approvals: manual | auto | skip (null = auto). "manual"
+  # pauses for every action and stalls unattended runs. Cowork mode only.
+  cowork_approval:
+    value: "auto"
+    required: false
+  # Model config value → claude.ai dropdown label (see MODEL_LABELS in
+  # claude_web_agent.py). Preflight still requires this to be non-null for
+  # benchmark runs so the DB identity is explicit.
   model:
-    value: "sonnet_4_6"        # opus_4_6 | sonnet_4_6 | haiku_4_5
+    value: "fable_5"           # fable_5 | sonnet_5 | haiku_4_5 | opus_4_8 |
+                               # opus_4_7 | opus_4_6 | opus_3 | sonnet_4_6
+    required: false
+  # Reasoning effort via the model dropdown's Effort submenu.
+  # null = keep the session's current level (UI default: high).
+  effort:
+    value: "max"               # low | medium | high | xhigh | max | null
     required: false
   max_sec_per_task:
     value: 7200                # 2h
@@ -305,12 +329,36 @@ chatgpt_web:
   project_slug:
     value: null
     required: false
-  # null is valid (uses the current session default).
+  # Model (the nested submenu of the composer pill). null is valid (uses
+  # the current session default). Legacy one-axis values instant/thinking/
+  # pro are auto-routed to the intelligence axis with a warning.
   model:
-    value: null                # instant | thinking | pro | null
+    value: "gpt_5_6_sol"       # gpt_5_6_sol | gpt_5_5 | gpt_5_4 | gpt_5_3 |
+                               # o3 | null
     required: false
+  # Surface mode: "chat" | "work". Selection persists across sessions;
+  # the agent asserts it every task. Bifurcates the DB identity.
+  mode:
+    value: "work"
+    required: false
+  # WORK-mode picker (pill menu > Advanced): effort + speed.
+  # Work-mode models: gpt_5_6_sol | gpt_5_6_terra | gpt_5_6_luna | gpt_5_5.
+  effort:
+    value: "ultra"             # light | medium | high | xhigh | max | ultra
+    required: false
+  speed:
+    value: "standard"          # standard | fast
+    required: false
+  # CHAT-mode intelligence axis (the pill's top-level radios). Must be
+  # null when mode == "work".
+  intelligence:
+    value: null                # instant | medium | high | xhigh | pro | null
+    required: false
+  # DEPRECATED: Agent mode no longer exists in the ChatGPT UI (removed
+  # ~mid-2026). Accepted but ignored by the agent; identity resolution
+  # refuses agent_mode=true to keep mislabeled rows out of the DB.
   agent_mode:
-    value: true
+    value: false
     required: false
   max_sec_per_task:
     value: 7200                # 2h

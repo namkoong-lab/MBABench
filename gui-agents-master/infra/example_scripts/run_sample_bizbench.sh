@@ -14,7 +14,7 @@
 #      (Or export BIZBENCHJUDGE_KEYS_DATABASE_URL in the env instead of
 #      setting database.url.)
 #   2. AWS credentials resolvable by boto3 (e.g. ~/.aws/credentials) with
-#      GetObject permission on the biz-bench bucket.
+#      GetObject permission on the mbabench bucket.
 #   3. Have Chrome running on the ChatGPT CDP port (default 9333) with a
 #      logged-in chatgpt.com session.
 #   4. (Optional) Edit infra/configs/run_configs/bizbench_run_examples/sample_bizbench.yaml

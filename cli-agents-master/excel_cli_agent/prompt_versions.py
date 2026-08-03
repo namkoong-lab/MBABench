@@ -15,6 +15,9 @@ PROMPT_VERSIONS = {
     "v8": {"system": "system_prompt_v8.txt", "fmwc": "task_template_fmwc_v4.txt", "wsp": "task_template_wsp_v1.txt"},
     "v9": {"system": "system_prompt_v9.txt", "fmwc": "task_template_fmwc_v4.txt", "wsp": "task_template_wsp_v1.txt"},
     "v10": {"system": "system_prompt_v10.txt", "fmwc": "task_template_fmwc_v4.txt", "wsp": "task_template_wsp_v1.txt"},
+    # v11: byte-exact prompts of the pv1105 benchmark wave (system v11 + fmwc/wsp
+    # templates v5), recovered from S3 task_attempts.prompt_files. Frozen — do not edit.
+    "v11": {"system": "system_prompt_v11.txt", "fmwc": "task_template_fmwc_v5.txt", "wsp": "task_template_wsp_v5.txt"},
 }
 DEFAULT_PROMPT_VERSION = "v10"
 

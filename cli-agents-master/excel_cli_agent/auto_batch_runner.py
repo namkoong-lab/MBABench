@@ -55,7 +55,7 @@ class AutoBatchRunner(BatchRunner):
         super().__init__(config_path, server_path, api_key, custom_reasoning, enable_langfuse)
         self._s3_client = None
         self._prompt_s3_uris: Optional[List[str]] = None
-        self._s3_bucket = "biz-bench"
+        self._s3_bucket = "mbabench"
 
     @property
     def s3_client(self):
@@ -94,9 +94,12 @@ class AutoBatchRunner(BatchRunner):
         if not config.get('workspace_base_dir'):
             raise ValueError("workspace_base_dir is required in auto_mode")
 
-        # Must have either tasks or task_filter
-        if 'tasks' not in config and 'task_filter' not in config:
-            raise ValueError("Either 'tasks' (list of task names) or 'task_filter' is required")
+        # Must have either tasks, task_ids, or task_filter
+        if 'tasks' not in config and 'task_ids' not in config and 'task_filter' not in config:
+            raise ValueError(
+                "Either 'tasks' (list of task names), 'task_ids' (list of task ids), "
+                "or 'task_filter' is required"
+            )
 
         # Set defaults
         config.setdefault('verbose', False)
@@ -105,6 +108,11 @@ class AutoBatchRunner(BatchRunner):
         config.setdefault('snapshot_iterations', False)
         config.setdefault('max_trials', 7)
         config.setdefault('trials_since', date.today().isoformat())
+        # When true, a task with a non-failed attempt (for this agent, since
+        # trials_since) is skipped even if trials remain — so a resumed batch
+        # never re-runs tasks that already succeeded. Default false preserves
+        # the historical trial-count-only behavior.
+        config.setdefault('skip_if_succeeded', False)
 
         # Default agent_folder from model name
         if 'agent_folder' not in config:
@@ -147,7 +155,28 @@ class AutoBatchRunner(BatchRunner):
     def _resolve_tasks_impl(self, db) -> List[TaskInfo]:
         tasks_result = []
 
-        if 'tasks' in self.config:
+        if 'task_ids' in self.config:
+            # Explicit task ids mode — preserves the given order (e.g. a
+            # lightest-to-heaviest ranking).
+            task_ids = self.config['task_ids']
+            print(f"\n🔍 Resolving {len(task_ids)} explicit task id(s) from database...")
+            for tid in task_ids:
+                task = db.query(Task).filter(Task.id == tid).first()
+                if task is None:
+                    print(f"  ❌ id {tid} -> NOT FOUND in DB")
+                    continue
+                if task.deprecated:
+                    print(f"  ⏭️  id {tid} ({task.task_name}) -> deprecated, skipping")
+                    continue
+                tasks_result.append(TaskInfo(
+                    task_id=task.id,
+                    task_name=task.task_name,
+                    task_source=task.task_source,
+                    task_starting_files=task.task_starting_files or [],
+                ))
+                print(f"  ✅ id {tid} -> {task.task_name} ({task.task_source})")
+
+        elif 'tasks' in self.config:
             # Explicit task names mode
             task_names = self.config['tasks']
             print(f"\n🔍 Resolving {len(task_names)} explicit task(s) from database...")
@@ -207,6 +236,16 @@ class AutoBatchRunner(BatchRunner):
                         task_starting_files=task.task_starting_files or [],
                     ))
 
+        # Explicit skip list — tasks intentionally deferred (e.g. starting
+        # files too large for the model's input context). See SKIPPED_TASKS.md.
+        skip_ids = set(self.config.get('skip_task_ids') or [])
+        if skip_ids:
+            kept = [t for t in tasks_result if t.task_id not in skip_ids]
+            dropped = sorted({t.task_id for t in tasks_result} & skip_ids)
+            if dropped:
+                print(f"⏭️  Skipping {len(dropped)} task id(s) via skip_task_ids: {dropped}")
+            tasks_result = kept
+
         print(f"📋 Total tasks to process: {len(tasks_result)}")
         return tasks_result
 
@@ -262,8 +301,28 @@ class AutoBatchRunner(BatchRunner):
         finally:
             db.close()
 
+    def _has_success(self, task_info: TaskInfo) -> bool:
+        """True if a non-failed, non-deprecated attempt exists for this
+        task+agent since trials_since."""
+        db = SessionLocal()
+        try:
+            row = db.query(TaskAttempt.id).filter(
+                TaskAttempt.task_id == task_info.task_id,
+                TaskAttempt.agent_model_name == self.config['agent_folder'],
+                TaskAttempt.deprecated == False,  # noqa: E712
+                TaskAttempt.agent_failed.isnot(True),
+                TaskAttempt.created_at >= self.config['trials_since'],
+            ).first()
+            return row is not None
+        finally:
+            db.close()
+
     def should_skip(self, task_info: TaskInfo) -> bool:
-        """Check if task should be skipped due to max trials reached."""
+        """Check if task should be skipped (already succeeded, or max trials)."""
+        if self.config.get('skip_if_succeeded') and self._has_success(task_info):
+            print(f"  ⏭️  {task_info.task_name}: already has a successful attempt, skipping")
+            return True
+
         trial_count = self.get_trial_count(task_info)
         max_trials = self.config['max_trials']
 
@@ -435,9 +494,15 @@ class AutoBatchRunner(BatchRunner):
         # Cost - direct from execution (use 0 if not available, never None since column is nullable)
         total_cost = workspace_result.cost_usd if workspace_result.cost_usd > 0 else 0.0
 
-        # Determine failure status
+        # Determine failure status. Hitting the iteration cap is NOT a
+        # failure: the workbook was still built and uploaded, and it gets
+        # judged as-is. This matches the prior benchmark wave's rows
+        # (agent_failed=false with reason "Max iterations (N) reached" —
+        # 215 such rows at prompt_version 1105).
         agent_failed = workspace_result.status != "success"
         agent_failed_reason = workspace_result.error_message if agent_failed else None
+        if agent_failed and (agent_failed_reason or "").startswith("Max iterations"):
+            agent_failed = False
 
         # Compute prompt_version from versioned file paths
         template_path = TASK_TEMPLATE_WSP_PATH if task_info.task_source == "wsp" else TASK_TEMPLATE_FMWC_PATH

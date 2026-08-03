@@ -48,12 +48,21 @@ CHROME_CDP_PATHS = [
 ]
 
 
-def kill_chrome_cdp() -> None:
-    """Kill Chrome processes occupying the CDP port so a fresh instance can start."""
+def kill_chrome_cdp(cdp_port: int | None = None) -> None:
+    """Kill the Chrome instance on ONE CDP port so a fresh one can start.
+
+    Port-scoped on purpose: parallel runs keep several debug Chromes alive
+    (e.g. Claude on 9223, ChatGPT on 9226), and the old unscoped
+    ``pkill -f chrome.*remote-debugging-port`` cross-killed every one of
+    them on any single stale-CDP retry.
+    """
     system = platform.system()
-    logger.warning("Killing stale Chrome processes on CDP port...")
+    port = cdp_port or CDP_PORT
+    logger.warning(f"Killing stale Chrome on CDP port {port}...")
     try:
         if system == "Windows":
+            # No per-port scoping via taskkill; nuke-all is the only option.
+            logger.warning("Windows: killing ALL chrome.exe (no port scoping)")
             subprocess.run(
                 ["taskkill", "/F", "/IM", "chrome.exe"],
                 stdout=subprocess.DEVNULL,
@@ -61,7 +70,7 @@ def kill_chrome_cdp() -> None:
             )
         else:
             subprocess.run(
-                ["pkill", "-f", "chrome.*remote-debugging-port"],
+                ["pkill", "-f", f"remote-debugging-port={port}($| )"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -272,15 +281,19 @@ class WebBrowserManager:
             if stale:
                 logger.warning(
                     f"CDP handshake rejected (stale Chrome): {e}. "
-                    "Killing Chrome and retrying..."
+                    f"Killing Chrome on port {self.cdp_port} and retrying..."
                 )
-                kill_chrome_cdp()
+                kill_chrome_cdp(self.cdp_port)
 
                 display = os.environ.get("DISPLAY", "")
                 use_headless = self.headless or (
                     not display and platform.system() != "Darwin"
                 )
-                process = launch_chrome_cdp(headless=use_headless)
+                process = launch_chrome_cdp(
+                    headless=use_headless,
+                    profile_dir=self.profile_dir,
+                    cdp_port=self.cdp_port,
+                )
                 if not process:
                     raise RuntimeError("Chrome not found after restart")
                 if not await wait_for_chrome_ready():
@@ -288,7 +301,7 @@ class WebBrowserManager:
                     raise RuntimeError("Chrome failed to start after restart")
 
                 try:
-                    browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+                    browser = await playwright.chromium.connect_over_cdp(cdp_url)
                     logger.info("Connected to Chrome via CDP (after restart)")
                 except Exception as e2:
                     logger.error(f"CDP connection failed after restart: {e2}")

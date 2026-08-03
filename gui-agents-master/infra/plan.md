@@ -7,7 +7,7 @@
 
 1. Run the existing web-GUI automation (Claude.ai / ChatGPT) on AWS, unattended.
 2. Replace hand-written YAML task lists with a **pluggable task source** so the batch runner can be fed from any backend (local files, Postgres + S3, SQLite, a queue, ...).
-3. Provide a **Bizbench-specific** source/sink implementation that reads `tasks` rows and writes `task_attempts` rows against the existing Neon Postgres DB + `biz-bench` S3 bucket, matching the conventions already used in `cli-agents-master/excel_cli_agent/auto_batch_runner.py` and `judge/operation_scripts/get_tasks.py`.
+3. Provide a **Bizbench-specific** source/sink implementation that reads `tasks` rows and writes `task_attempts` rows against the existing Neon Postgres DB + `mbabench` S3 bucket, matching the conventions already used in `cli-agents-master/excel_cli_agent/auto_batch_runner.py` and `judge/operation_scripts/get_tasks.py`.
 4. Touch the GUI engine as little as possible. The engine already accepts a task-config dict with `upload_files`, `solution_name`, etc. — keep that contract; only swap what produces those dicts and what consumes the resulting solution.
 
 Non-goals: rewriting the engine, changing the prompt templates, or moving off Chrome+CDP.
@@ -39,7 +39,7 @@ Non-goals: rewriting the engine, changing the prompt templates, or moving off Ch
               ┌─────────┴──────────┐
               ▼                    ▼
    ┌────────────────────┐   ┌────────────────────┐
-   │ Neon Postgres      │   │ S3 (biz-bench)     │
+   │ Neon Postgres      │   │ S3 (mbabench)     │
    │  - tasks           │   │  - BizbenchV1/...  │
    │  - task_attempts   │   │    starting_files  │
    │                    │   │    attempts        │
@@ -287,7 +287,7 @@ Two reference sources ship out of the box:
 | DB | Neon Postgres | `judge/project_configs.yaml` |
 | DB URL env var | `BIZBENCHJUDGE_KEYS_DATABASE_URL` | `judge/operation_scripts/get_tasks.py` |
 | Scratch dir env var | `BIZBENCHJUDGE_PATHS_SCRATCH_PATH` | same |
-| S3 bucket | `biz-bench` | `cli-agents-master/excel_cli_agent/auto_batch_runner.py` |
+| S3 bucket | `mbabench` | `cli-agents-master/excel_cli_agent/auto_batch_runner.py` |
 | S3 attempts prefix | `BizbenchV1/attempts/{agent_folder}/task_source={src}/task_id={id}` | same |
 | S3 URI format | `s3://bucket/key` | `judge/operation_scripts/get_tasks.py:parse_s3_uri` |
 | `tasks` columns | `id, task_name, task_starting_files, task_solution_files, task_source, deprecated, ...` | `get_tasks.py` |
@@ -329,7 +329,7 @@ Trial / idempotency behavior mirrors `AutoBatchRunner._task_has_recent_attempts`
 
 Responsibilities:
 
-1. **Upload** `result.solution_file` to `s3://biz-bench/BizbenchV1/attempts/{agent_folder}/task_source={src}/task_id={id}/{timestamp}_{basename}`.
+1. **Upload** `result.solution_file` to `s3://mbabench/BizbenchV1/attempts/{agent_folder}/task_source={src}/task_id={id}/{timestamp}_{basename}`.
 2. **Upload** the per-task JSON log (same one [completion_logger.py](../claude_web_agent/completion_logger.py) already writes) alongside.
 3. **Insert** a row into `task_attempts`:
 
@@ -342,7 +342,7 @@ Responsibilities:
    ) VALUES (...)
    ```
 
-   with `attempt_files = ARRAY['s3://biz-bench/.../solution.xlsx', 's3://biz-bench/.../completion_log.json']`.
+   with `attempt_files = ARRAY['s3://mbabench/.../solution.xlsx', 's3://mbabench/.../completion_log.json']`.
 
 In addition to the strict-credentials contract and STS identity log described above for the source, the sink also calls `s3.head_bucket(aws.s3_bucket)` at construction — a single HEAD request that validates both credential validity and bucket access in one shot, before the engine spends up to 45 min on a task that can't be persisted. Missing bucket / `AccessDenied` / bad region → `ValueError` with an actionable message.
 
@@ -439,7 +439,7 @@ Compatibility note: all four scripts are POSIX-flavored bash that works under ma
   ```
   These env var names match what `database.url_env` and `aws.*_env` in `configs.yaml` resolve to, so the strict-credentials contract (boto3 default chain NOT consulted) is satisfied without code changes.
 - **Resolved (was an open question):** credentials delivery on EC2 uses long-lived IAM user keys injected via systemd `EnvironmentFile=`. The "IAM instance profile + STS pre-start hook" alternative is deferred to Phase 5+ — it buys rotation but adds install complexity, and we aren't rotating yet.
-- **IAM policy on the user** (not the box): `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on the `biz-bench` bucket; `sts:GetCallerIdentity` is always allowed.
+- **IAM policy on the user** (not the box): `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on the `mbabench` bucket; `sts:GetCallerIdentity` is always allowed.
 - **No AWS keys in the repo.** `.aws_defaults` holds *names* (key name, SG id) but not secrets.
 
 ### Local state files

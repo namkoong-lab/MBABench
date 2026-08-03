@@ -159,7 +159,7 @@ aws:
     value: "AWS_SESSION_TOKEN"
     required: false
   s3_bucket:
-    value: "biz-bench"
+    value: "mbabench"
     required: false
   s3_prefix:
     value: "BizbenchV1/attempts"   # final key = {prefix}/{agent_folder}/task_source={src}/task_id={id}/...

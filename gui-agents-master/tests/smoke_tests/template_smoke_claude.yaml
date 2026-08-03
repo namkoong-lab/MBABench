@@ -15,16 +15,21 @@ template:
   db_enabled: false
 
   claude_web:
-    project_id: "your-project-id-here"
-    model: null
+    project_id: "019f85bc-934b-73dd-b90d-79e48e2089ee"
+    # Benchmark target: Cowork mode, Fable 5 at Max effort (no thinking
+    # switch exists for this combination), auto-approved actions.
+    mode: cowork
+    cowork_approval: auto
+    model: fable_5
+    effort: max
 
-    max_sec_per_task: 600
+    max_sec_per_task: 900
 
     retry:
       max_agent_attempts: 1
       max_total_attempts: 2
-      max_sec_per_task: 600
-      max_sec_per_attempt: 600
+      max_sec_per_task: 900
+      max_sec_per_attempt: 900
 
     output:
       base_dir: "."
@@ -34,9 +39,10 @@ template:
       type: "chrome"
       headless: false
       timeout: 30000
+      cdp_port: 9223              # must match Chrome --remote-debugging-port
 
     check_interval_seconds: 2
-    max_wait_per_prompt_seconds: 120
+    max_wait_per_prompt_seconds: 600   # max effort thinks longer, even on trivial prompts
 
     logging:
       level: "DEBUG"

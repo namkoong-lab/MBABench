@@ -263,6 +263,53 @@ def setup_logging(config: dict, name: str, task_name: str = None) -> tuple:
     return logging.getLogger(name), log_file_path
 
 
+def resolve_prompts(config: dict) -> dict:
+    """Expand ``prompts_file`` into the ``prompts`` list, in place.
+
+    Benchmark prompts are long (~13k chars) and are the experimental control:
+    duplicating them across template YAMLs invites silent drift between runs.
+    ``prompts_file`` points at one or more text files, each holding exactly
+    one prompt, so every config references a single source of truth.
+
+    Paths resolve relative to the repo root, then CWD. ``prompts_file`` wins
+    over an inline ``prompts`` list; a missing file is fatal (running the
+    benchmark with the wrong prompt is worse than not running it).
+    """
+    spec = config.get("prompts_file")
+    if not spec:
+        return config
+
+    paths = [spec] if isinstance(spec, str) else list(spec)
+    repo_root = Path(__file__).resolve().parent.parent
+    resolved: list[str] = []
+    for raw in paths:
+        p = Path(raw)
+        if not p.is_absolute():
+            candidate = repo_root / p
+            p = candidate if candidate.exists() else Path.cwd() / p
+        if not p.exists():
+            raise FileNotFoundError(
+                f"prompts_file not found: {raw!r} (looked in {repo_root} and "
+                f"{Path.cwd()}). Refusing to run with the wrong prompt."
+            )
+        resolved.append(p.read_text())
+
+    if config.get("prompts"):
+        logger.warning(
+            "Both prompts_file and prompts are set — prompts_file wins "
+            "(%d prompt(s) from %s)",
+            len(resolved),
+            ", ".join(str(x) for x in paths),
+        )
+    config["prompts"] = resolved
+    logger.info(
+        "Loaded %d prompt(s) from prompts_file (%d chars total)",
+        len(resolved),
+        sum(len(p) for p in resolved),
+    )
+    return config
+
+
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file."""
     import yaml
@@ -274,7 +321,7 @@ def load_config(config_path: str) -> dict:
     if "template" in config:
         config = config["template"]
 
-    return config
+    return resolve_prompts(config)
 
 
 def get_provider_config(config: dict) -> tuple[str, dict]:
@@ -311,7 +358,6 @@ PROVIDER_DEFAULTS = {
     "claude_web": {
         "folder_prefix": "claudeGUI",
         "agent_name": "claude_web",
-        "agent_model_name": "Opus 4.7",
     },
     "chatgpt_web": {
         "folder_prefix": "chatgptGUI",
@@ -672,6 +718,18 @@ async def run_automation(config: dict) -> bool:
                         ]
                         if excel_files:
                             break
+
+                    # Download controls were on the page but retrieval
+                    # failed — the model already FINISHED. A "Continue"
+                    # prompt would just spam a completed model; fail the
+                    # attempt as a download problem instead.
+                    if getattr(agent, "last_download_saw_buttons", False):
+                        logger.warning(
+                            "Download buttons visible but no file retrieved "
+                            "— skipping 'Continue' (retrieval failure, not "
+                            "an incomplete model)"
+                        )
+                        break
 
                 if not downloaded_files or not excel_files:
                     agent_attempts += 1

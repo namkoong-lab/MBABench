@@ -23,8 +23,13 @@ agent:
     value: 9
 
 chatgpt_web:
+  # LEGACY one-axis pinning: model "pro" is auto-routed to the
+  # intelligence axis (identity: chatgpt_web_pro). For the 2026-07
+  # benchmark refresh use the two-axis form instead:
+  #   model: "gpt_5_6_sol"
+  #   intelligence: "pro"     # identity: chatgpt_web_gpt5.6_sol_pro
   model: "pro"
-  agent_mode: false  # control whether to use agentic mode
+  agent_mode: false  # Agent mode no longer exists; must stay false
   # Paste from https://chatgpt.com/g/g-p-{project_id}-{slug}/project.
   # Required — preflight exits if either is null/empty under provider=chatgpt.
   project_id: "6958bb36c8e88191a6df89918a683e0d"

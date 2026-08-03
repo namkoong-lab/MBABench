@@ -96,7 +96,16 @@ class ExcelTaskExecutor:
         if self.base_url and "anthropic" in self.base_url.lower():
             # Anthropic-compatible endpoint
             self.use_anthropic_direct = True
-            self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+            # The api_key argument may be a generic key resolved upstream (cli.py
+            # prefers OPENAI_API_KEY when several are set in .env). Only use it
+            # here if it is actually an Anthropic key; otherwise fall back to
+            # ANTHROPIC_API_KEY, then to the argument as a last resort.
+            _looks_anthropic = (api_key or "").startswith("sk-ant-")
+            self.api_key = (
+                (api_key if _looks_anthropic else None)
+                or os.getenv("ANTHROPIC_API_KEY")
+                or api_key
+            )
             if not self.api_key:
                 raise ValueError("API key required. Set ANTHROPIC_API_KEY in .env or pass --api-key")
             if not ANTHROPIC_ENABLED:
@@ -104,6 +113,13 @@ class ExcelTaskExecutor:
             self.anthropic_client = anthropic.Anthropic(
                 api_key=self.api_key,
                 base_url=self.base_url,
+                # The SDK default read timeout is 600s. A max-effort model
+                # (claude-fable-5) can spend longer than that on a single heavy
+                # turn, and the default fires "The read operation timed out"
+                # mid-generation, abandoning the whole task ($0, wasted). Give
+                # the streaming read a generous window (matches the max-effort
+                # per-call budget); connect stays short.
+                timeout=httpx.Timeout(3600.0, connect=30.0),
             )
         elif self.base_url:
             # OpenAI-compatible endpoint (vLLM, SGLang, OpenRouter, etc.)
@@ -131,7 +147,10 @@ class ExcelTaskExecutor:
                 self.api_key = anthropic_api_key or os.getenv("ANTHROPIC_API_KEY") or api_key
                 if not self.api_key:
                     raise ValueError("API key required for Anthropic direct access")
-                self.anthropic_client = anthropic.Anthropic(api_key=self.api_key)
+                self.anthropic_client = anthropic.Anthropic(
+                    api_key=self.api_key,
+                    timeout=httpx.Timeout(3600.0, connect=30.0),  # see note above
+                )
             elif not self.api_key:
                 self.api_key = api_key
 
@@ -139,6 +158,8 @@ class ExcelTaskExecutor:
         # High reasoning efforts need more time (xhigh: 300s, high: 240s, etc.)
         if api_timeout_seconds:
             timeout_secs = api_timeout_seconds
+        elif reasoning_effort == "max":
+            timeout_secs = 3600  # Anthropic effort-based models (e.g. claude-fable-5)
         elif reasoning_effort == "xhigh":
             timeout_secs = 300  # 5 minutes for xhigh reasoning
         elif reasoning_effort == "high":
@@ -146,8 +167,16 @@ class ExcelTaskExecutor:
         else:
             timeout_secs = 180  # 3 minutes default
 
-        # Use httpx.Timeout for granular control over read/connect timeouts
-        self.api_timeout = httpx.Timeout(float(timeout_secs), read=60.0, write=60.0, connect=30.0)
+        # Use httpx.Timeout for granular control over read/connect timeouts.
+        # read must cover the longest SILENT gap in a stream: high-reasoning
+        # models (e.g. gpt-5.6-sol at xhigh) can think for minutes between
+        # streamed chunks, and the old fixed read=60.0 killed healthy calls
+        # mid-reasoning ("Request timed out", observed 2026-07-23). Tie it to
+        # the overall timeout instead; the SIGALRM hard timeout still bounds
+        # the whole call.
+        self.api_timeout = httpx.Timeout(
+            float(timeout_secs), read=float(timeout_secs), write=60.0, connect=30.0
+        )
 
         # Hard timeout for signal.alarm (must be less than cloud NAT timeout ~600s)
         self.hard_timeout_seconds = timeout_secs
@@ -702,6 +731,22 @@ class ExcelTaskExecutor:
                 "budget_tokens": self.thinking_budget_tokens
             }
             print(f"🧠 Anthropic extended thinking: budget={self.thinking_budget_tokens} tokens")
+        elif self.reasoning_effort:
+            # Effort-based thinking models (claude-fable-5, claude-opus-4-8):
+            # budget_tokens is rejected with HTTP 400; reasoning depth is
+            # requested via output_config ({"effort": "low|medium|high|xhigh|max"}).
+            # Thinking must be enabled EXPLICITLY: Fable's is always on, but on
+            # Opus 4.8/4.7 omitting `thinking` runs WITHOUT thinking, so effort
+            # alone would spend tokens with no reasoning. `{"type": "adaptive"}`
+            # is accepted by every effort-based Anthropic model, so set it here
+            # for all of them. Budget-based models (Opus 4.6 and older) keep
+            # setting thinking_budget_tokens and take the branch above unchanged.
+            request_kwargs["thinking"] = {"type": "adaptive"}
+            request_kwargs["output_config"] = {"effort": self.reasoning_effort}
+            print(
+                f"🧠 Anthropic adaptive thinking, effort={self.reasoning_effort} "
+                "(output_config)"
+            )
 
         print(f"📡 Calling Anthropic API (streaming): {self.model}")
         start_time = time.time()

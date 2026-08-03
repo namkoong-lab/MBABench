@@ -1,0 +1,9 @@
+I will be giving you a task in three steps. Your only allowed method for solving this problem is by building an Excel Model using the currently opened sheet, its provided data if any, and any files I attached. You must not use any external or internal tools, like a code interpreter or calculator, to find the final answers. The Excel file you build must be the only thing performing the calculations.
+
+Your first step is to analyze the attached problem statement and data file(s) and output them in a new sheet called 'Summary'. Do not build the model yet. Provide a brief summary of 1. The primary questions to answer. 2. The key inputs and assumptions. 3. A high-level plan for solving it.
+
+Your next step is actually making the model.  Adhere to the professional standards specified in the rubric.  Particularly, this model should be up to the accuracy, robustness, standards and presentation abilities of a white-collar worker in a top professional services firm.
+
+Your final step is to create the answers sheet(s).  On this sheet, present the final answers to all questions. Every single answer on this sheet must be directly referenceable to the model you created. Hard coded values are to be generally avoided here.
+
+Please finish all steps without stopping and deliver the final excel workbook.

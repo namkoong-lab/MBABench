@@ -21,7 +21,10 @@ from utils.excel_utils import (
 from utils.llm_utils import (
     calculate_cost,
     get_client,
+    is_anthropic_model,
+    is_openai_model,
     robust_send_message,
+    strip_unsupported_anthropic_images,
     to_api_model_id,
 )
 from utils.logger import add_log_file, logger, remove_log_file
@@ -90,9 +93,17 @@ def _extract_json_from_response(text: str) -> str:
     - ``` ... ``` (no language tag)
     """
     stripped = text.strip()
-    # Fast path: already valid-looking JSON
+    # Fast path: already valid-looking JSON. Some models (e.g.
+    # gemini-3-flash-preview) append commentary AFTER the JSON value, which
+    # makes a plain json.loads raise "Extra data" and burns the caller's
+    # parse-retry budget. raw_decode parses only the first complete JSON
+    # value and reports where it ends, so trailing text is dropped.
     if stripped.startswith("{") or stripped.startswith("["):
-        return stripped
+        try:
+            _, end = json.JSONDecoder().raw_decode(stripped)
+            return stripped[:end]
+        except ValueError:
+            return stripped  # let the caller's json.loads raise clearly
 
     # Look for a fenced code block anywhere in the response
     match = _CODE_FENCE_RE.search(stripped)
@@ -2647,13 +2658,22 @@ def agentic_judge_case(
             wire_chars_at_call = _wire_char_total(state.messages)
 
             try:
+                _msgs = state.messages
+                if is_anthropic_model(model) or is_openai_model(model):
+                    # OpenAI (direct) 400s on emf/wmf/bmp/tiff parts just like
+                    # Anthropic; OpenRouter normalizes them, direct API doesn't.
+                    _msgs = strip_unsupported_anthropic_images(_msgs)
                 _create_kwargs = {
                     "model": to_api_model_id(model),
-                    "messages": state.messages,
+                    "messages": _msgs,
                     "tools": AGENTIC_JUDGE_TOOLS,
                 }
                 if reasoning_effort is not None:
-                    _create_kwargs["reasoning_effort"] = reasoning_effort
+                    # OpenAI chat/completions rejects function tools with any
+                    # reasoning_effort except 'none' (gpt-5.5).
+                    _create_kwargs["reasoning_effort"] = (
+                        "none" if is_openai_model(model) else reasoning_effort
+                    )
                 response = client.chat.completions.create(**_create_kwargs)
             except Exception as e:
                 err_str = str(e)
@@ -2884,13 +2904,18 @@ def agentic_judge_case(
                 )
 
                 try:
+                    _msgs = state.messages
+                    if is_anthropic_model(model) or is_openai_model(model):
+                        _msgs = strip_unsupported_anthropic_images(_msgs)
                     _create_kwargs = {
                         "model": to_api_model_id(model),
-                        "messages": state.messages,
+                        "messages": _msgs,
                         "tools": finalize_tools,
                     }
                     if reasoning_effort is not None:
-                        _create_kwargs["reasoning_effort"] = reasoning_effort
+                        _create_kwargs["reasoning_effort"] = (
+                            "none" if is_openai_model(model) else reasoning_effort
+                        )
                     response = client.chat.completions.create(**_create_kwargs)
                 except Exception as e:
                     logger.error(f"    Forced finalization API error: {e}. Stopping.")
